@@ -39,6 +39,8 @@ app.get("/run", async (req, res) => {
     // Download naar lokale map
     await sftp.fastGet(`${remoteDir}/${latest.name}`, localPath);
     await sftp.end();
+    // stuurt de originele bestandsdatum mee
+    res.setHeader("X-Backup-Date", new Date(latest.modifyTime).toISOString());
 
     // Stuur het bestand zelf terug aan de client (Apps Script)
     res.setHeader("Content-Disposition", `attachment; filename="${latest.name}"`);
@@ -53,3 +55,4 @@ app.get("/run", async (req, res) => {
 });
 
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
