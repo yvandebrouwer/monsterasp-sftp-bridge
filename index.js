@@ -6,7 +6,7 @@ import path from "path";
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// 🔹 Sta toe dat de X-Backup-Date header wordt meegegeven
+// Zorg dat custom headers beschikbaar blijven voor clients
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Expose-Headers", "X-Backup-Date");
   next();
@@ -47,13 +47,23 @@ app.get("/run", async (req, res) => {
     await sftp.fastGet(`${remoteDir}/${latest.name}`, localPath);
     await sftp.end();
 
-    // 🔹 Zet de originele bestandsdatum mee in de headers
-    res.setHeader("X-Backup-Date", new Date(latest.modifyTime).toISOString());
+    const backupDateIso = new Date(latest.modifyTime).toISOString();
+    console.log("Backupdatum:", backupDateIso);
+
+    // 🟢 Header twee keer expliciet zetten voor zekerheid
+    res.setHeader("X-Backup-Date", backupDateIso);
+    res.setHeader("Access-Control-Expose-Headers", "X-Backup-Date");
+
+    // 🔹 Headers voor download
     res.setHeader("Content-Disposition", `attachment; filename="${latest.name}"`);
     res.setHeader("Content-Type", "application/octet-stream");
 
-    // 🔹 Stuur het bestand als stream terug naar de client (Apps Script)
+    // 🔹 Bestand streamen naar de client
     const fileStream = fs.createReadStream(localPath);
+
+    // Nogmaals voor zekerheid net voor verzenden (sommige proxies wissen eerdere custom headers)
+    res.setHeader("X-Backup-Date", backupDateIso);
+
     fileStream.pipe(res);
   } catch (err) {
     console.error("Fout:", err.message);
