@@ -99,6 +99,8 @@ Samen vormen deze onderdelen een geautomatiseerde keten die zonder manuele tusse
 
 ### 9.3 Dataflow
 
+![Overzicht van backupstructuur](https://raw.githubusercontent.com/<jouw-account>/<repo>/main/schema-backup.png)
+
 ### 9.4 Belangrijke verbindingen
 
 | Verbinding | Protocol | Authenticatie | Frequentie |
