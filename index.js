@@ -6,6 +6,12 @@ import path from "path";
 const app = express();
 const PORT = process.env.PORT || 10000;
 
+// 🔹 Sta toe dat de X-Backup-Date header wordt meegegeven
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Expose-Headers", "X-Backup-Date");
+  next();
+});
+
 app.get("/", (req, res) => res.send("✅ MonsterASP SFTP Bridge OK"));
 
 // JSON endpoint (controle)
@@ -32,20 +38,21 @@ app.get("/run", async (req, res) => {
     const files = (await sftp.list(remoteDir)).filter(f => f.name.endsWith(".zpaq"));
     if (!files.length) throw new Error("Geen .zpaq-bestanden gevonden");
 
+    // 🔹 Sorteer op wijzigingsdatum (nieuwste eerst)
     files.sort((a, b) => b.modifyTime - a.modifyTime);
     const latest = files[0];
     const localPath = path.join(localDir, latest.name);
 
-    // Download naar lokale map
+    // 🔹 Download bestand
     await sftp.fastGet(`${remoteDir}/${latest.name}`, localPath);
     await sftp.end();
-    // stuurt de originele bestandsdatum mee
-    res.setHeader("X-Backup-Date", new Date(latest.modifyTime).toISOString());
 
-    // Stuur het bestand zelf terug aan de client (Apps Script)
+    // 🔹 Zet de originele bestandsdatum mee in de headers
+    res.setHeader("X-Backup-Date", new Date(latest.modifyTime).toISOString());
     res.setHeader("Content-Disposition", `attachment; filename="${latest.name}"`);
     res.setHeader("Content-Type", "application/octet-stream");
 
+    // 🔹 Stuur het bestand als stream terug naar de client (Apps Script)
     const fileStream = fs.createReadStream(localPath);
     fileStream.pipe(res);
   } catch (err) {
@@ -55,4 +62,3 @@ app.get("/run", async (req, res) => {
 });
 
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-
