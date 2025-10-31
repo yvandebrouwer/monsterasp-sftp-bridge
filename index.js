@@ -6,20 +6,66 @@ import path from "path";
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// Zorg dat custom headers beschikbaar blijven voor clients
+// ---------------------------
+// ALGEMENE INSTELLINGEN
+// ---------------------------
+
+// Zorg dat custom headers (zoals X-Backup-Date) beschikbaar blijven
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Expose-Headers", "X-Backup-Date");
+  res.setHeader("Access-Control-Allow-Origin", "*");
   next();
 });
 
 app.get("/", (req, res) => res.send("✅ MonsterASP SFTP Bridge OK"));
 
-// JSON endpoint (controle)
+// ---------------------------
+// /check  -> eenvoudige statuscontrole
+// ---------------------------
 app.get("/check", async (req, res) => {
-  res.json({ status: "OK", message: "Bridge werkt" });
+  res.json({ status: "OK", message: "Bridge werkt correct" });
 });
 
-// download endpoint
+// ---------------------------
+// /meta  -> alleen metadata (geen download)
+// ---------------------------
+app.get("/meta", async (req, res) => {
+  const sftp = new Client();
+  const remoteDir = "/";
+
+  try {
+    await sftp.connect({
+      host: "bh2.siteasp.net",
+      port: 22,
+      username: process.env.SFTP_USER,
+      password: process.env.SFTP_PASS,
+    });
+
+    const files = (await sftp.list(remoteDir)).filter(f => f.name.endsWith(".zpaq"));
+    if (!files.length) throw new Error("Geen .zpaq-bestanden gevonden");
+
+    // Sorteer op wijzigingsdatum (nieuwste eerst)
+    files.sort((a, b) => b.modifyTime - a.modifyTime);
+    const latest = files[0];
+    await sftp.end();
+
+    // Geef metadata terug in JSON
+    res.json({
+      status: "OK",
+      filename: latest.name,
+      sizeBytes: latest.size,
+      modified: new Date(latest.modifyTime).toISOString(),
+      message: "Laatste backup-info succesvol opgehaald"
+    });
+  } catch (err) {
+    console.error("Fout bij /meta:", err.message);
+    res.status(500).json({ status: "Error", error: err.message });
+  }
+});
+
+// ---------------------------
+// /run  -> download van laatste backup
+// ---------------------------
 app.get("/run", async (req, res) => {
   const sftp = new Client();
   const remoteDir = "/";
@@ -38,37 +84,41 @@ app.get("/run", async (req, res) => {
     const files = (await sftp.list(remoteDir)).filter(f => f.name.endsWith(".zpaq"));
     if (!files.length) throw new Error("Geen .zpaq-bestanden gevonden");
 
-    // 🔹 Sorteer op wijzigingsdatum (nieuwste eerst)
     files.sort((a, b) => b.modifyTime - a.modifyTime);
     const latest = files[0];
     const localPath = path.join(localDir, latest.name);
 
-    // 🔹 Download bestand
+    // Download bestand
     await sftp.fastGet(`${remoteDir}/${latest.name}`, localPath);
     await sftp.end();
 
     const backupDateIso = new Date(latest.modifyTime).toISOString();
     console.log("Backupdatum:", backupDateIso);
 
-    // 🟢 Header twee keer expliciet zetten voor zekerheid
+    // Voeg de originele datum mee in de headers
     res.setHeader("X-Backup-Date", backupDateIso);
     res.setHeader("Access-Control-Expose-Headers", "X-Backup-Date");
-
-    // 🔹 Headers voor download
     res.setHeader("Content-Disposition", `attachment; filename="${latest.name}"`);
     res.setHeader("Content-Type", "application/octet-stream");
 
-    // 🔹 Bestand streamen naar de client
+    // Extra JSON-header (voor debugging of clients die headers niet lezen)
+    res.setHeader("X-Backup-Meta", JSON.stringify({
+      filename: latest.name,
+      modified: backupDateIso,
+      sizeBytes: latest.size
+    }));
+
+    // Stream het bestand
     const fileStream = fs.createReadStream(localPath);
-
-    // Nogmaals voor zekerheid net voor verzenden (sommige proxies wissen eerdere custom headers)
-    res.setHeader("X-Backup-Date", backupDateIso);
-
     fileStream.pipe(res);
+
   } catch (err) {
     console.error("Fout:", err.message);
     res.status(500).json({ status: "Error", error: err.message });
   }
 });
 
+// ---------------------------
+// SERVER STARTEN
+// ---------------------------
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
