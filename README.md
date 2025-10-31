@@ -99,7 +99,7 @@ Samen vormen deze onderdelen een geautomatiseerde keten die zonder manuele tusse
 
 ### 9.3 Dataflow
 
-![Overzicht van backupstructuur](https://raw.githubusercontent.com/<jouw-account>/<repo>/main/schema-backup.png)
+![Overzicht van backupstructuur](https://raw.githubusercontent.com/debrouweryvan/monsterasp_sftp_bridge/main/schema-backup.png)
 
 ### 9.4 Belangrijke verbindingen
 
