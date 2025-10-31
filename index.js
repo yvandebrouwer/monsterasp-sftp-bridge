@@ -9,7 +9,7 @@ const PORT = process.env.PORT || 3000;
 
 app.get("/", (req, res) => res.send("✅ MonsterASP SFTP Bridge OK"));
 
-app.post("/run", async (req, res) => {
+app.all("/run", async (req, res) => {
   const sftp = new Client();
   const remoteDir = "/";
   const localDir = "/tmp/backups";
@@ -51,3 +51,4 @@ app.post("/run", async (req, res) => {
 });
 
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
