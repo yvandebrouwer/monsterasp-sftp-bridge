@@ -10,7 +10,7 @@ clasp login
 
 \* **Open je projectmap in cmd:**
 
-cd C:\\Users\\debro\\source\\repos\\monsterasp-sftp-bridge
+cd C:\\Users\\<username>\\source\\repos\\monsterasp-sftp-bridge
 
 \* **Haal wijzigingen uit Google Script in cmd:**
 
