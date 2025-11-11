@@ -1,28 +1,23 @@
 /*************************************************************
  *  MONSTERASP BACKUP VIA RENDER + GOOGLE DRIVE (EENVOUDIG + WAKEUP)
- *  ----------------------------------------------------------
- *  Haalt de back-up op via Render, bewaart ze op Google Drive,
- *  en stuurt een e-mail met enkel een logbestand (geen Drive-link
- *  in de mail, geen .zpaq bijlage, volledig veilig).
  *************************************************************/
-
 function getMonsterBackup() {
   // 👋 Render eerst wakker maken
   wakeUpRender();
+  Utilities.sleep(10000); // wacht 10s zodat Render kan opstarten
 
   const metaUrl = "https://monsterasp-sftp-bridge-i7as.onrender.com/meta";
   const runUrl  = "https://monsterasp-sftp-bridge-i7as.onrender.com/run";
 
-
   try {
-    // --- Metadata ophalen ---
+    Logger.log("Ophalen metadata...");
     const metaResp = UrlFetchApp.fetch(metaUrl);
     const meta = JSON.parse(metaResp.getContentText());
     const backupDate = new Date(meta.modified);
     const datumString = Utilities.formatDate(backupDate, Session.getScriptTimeZone(), "yyyy-MM-dd_HH-mm");
     const filename = meta.filename.replace(".zpaq", `_${datumString}.zpaq`);
 
-    // --- Bestand downloaden en opslaan ---
+    Logger.log("Download uitvoeren...");
     const resp = UrlFetchApp.fetch(runUrl);
     if (resp.getResponseCode() !== 200) throw new Error("Download mislukt");
 
@@ -31,7 +26,6 @@ function getMonsterBackup() {
     const file = folder.createFile(blob).setName(filename);
     const deletedCount = cleanupOldBackups(folder);
 
-    // --- Logtekst (Drive-link alleen in logbestand) ---
     const log =
       `✅ MONSTERASP BACK-UP GESLAAGD\n\n` +
       `Datum: ${datumString}\n` +
@@ -41,7 +35,6 @@ function getMonsterBackup() {
       `De back-up werd opgeslagen op Google Drive.\n` +
       `(Link niet in e-mail opgenomen: ${file.getUrl()})\n`;
 
-    // --- Mail versturen met enkel logbestand ---
     const logBlob = Utilities.newBlob(log, "text/plain", `backup_log_${datumString}.txt`);
     MailApp.sendEmail({
       to: "debrouweryvan@gmail.com",
@@ -51,7 +44,6 @@ function getMonsterBackup() {
     });
 
     Logger.log("✅ Back-up voltooid zonder Drive-link in e-mail.");
-
   } catch (err) {
     const body =
       `❌ MONSTERASP BACK-UP MISLUKT\n\n` +
@@ -88,11 +80,9 @@ function getOrCreateFolder(name) {
 
 /*************************************************************
  *  WAKEUP FUNCTIE
- *  ----------------------------------------------------------
- *  Houd Render wakker door vooraf even een ping te sturen.
  *************************************************************/
 function wakeUpRender() {
-  const url = "https://monsterasp-sftp-bridge.onrender.com/";
+  const url = "https://monsterasp-sftp-bridge-i7as.onrender.com/"; // juiste domein
   try {
     const start = new Date().getTime();
     const resp = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
@@ -102,4 +92,3 @@ function wakeUpRender() {
     Logger.log("Ping mislukt: " + e.message);
   }
 }
-
