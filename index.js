@@ -18,6 +18,23 @@ app.use((req, res, next) => {
 app.get("/", (req, res) => res.send("✅ MonsterASP SFTP Bridge OK"));
 
 // ---------------------------
+// Functie om echte mtime op te halen via sftp.stat()
+// ---------------------------
+async function enrichWithRealMtime(sftp, remoteDir, files) {
+  const result = [];
+  for (const f of files) {
+    try {
+      const st = await sftp.stat(`${remoteDir}/${f.name}`);
+      f.realMtime = st.modifyTime || st.mtime || 0;
+    } catch {
+      f.realMtime = 0;
+    }
+    result.push(f);
+  }
+  return result;
+}
+
+// ---------------------------
 // /check
 // ---------------------------
 app.get("/check", async (req, res) => {
@@ -39,11 +56,11 @@ app.get("/meta", async (req, res) => {
       password: process.env.SFTP_PASS,
     });
 
-    const files = (await sftp.list(remoteDir)).filter(f => f.name.endsWith(".zpaq"));
+    let files = (await sftp.list(remoteDir)).filter(f => f.name.endsWith(".zpaq"));
     if (!files.length) throw new Error("Geen .zpaq-bestanden gevonden");
 
-    // Gebruik betrouwbare mtime
-    files.sort((a, b) => (b.attrs?.mtime || b.modifyTime) - (a.attrs?.mtime || a.modifyTime));
+    files = await enrichWithRealMtime(sftp, remoteDir, files);
+    files.sort((a, b) => b.realMtime - a.realMtime);
     const latest = files[0];
 
     await sftp.end();
@@ -52,7 +69,7 @@ app.get("/meta", async (req, res) => {
       status: "OK",
       filename: latest.name,
       sizeBytes: latest.size,
-      modified: new Date((latest.attrs?.mtime || latest.modifyTime) * 1000).toISOString(),
+      modified: new Date(latest.realMtime * 1000).toISOString(),
       message: "Laatste backup-info succesvol opgehaald"
     });
   } catch (err) {
@@ -76,16 +93,18 @@ app.get("/list", async (req, res) => {
       password: process.env.SFTP_PASS,
     });
 
-    const files = (await sftp.list(remoteDir)).filter(f => f.name.endsWith(".zpaq"));
+    let files = (await sftp.list(remoteDir)).filter(f => f.name.endsWith(".zpaq"));
     if (!files.length) throw new Error("Geen .zpaq-bestanden gevonden");
 
-    files.sort((a, b) => (b.attrs?.mtime || b.modifyTime) - (a.attrs?.mtime || a.modifyTime));
+    files = await enrichWithRealMtime(sftp, remoteDir, files);
+    files.sort((a, b) => b.realMtime - a.realMtime);
+
     await sftp.end();
 
     const list = files.map(f => ({
       filename: f.name,
       sizeBytes: f.size,
-      modified: new Date((f.attrs?.mtime || f.modifyTime) * 1000).toISOString()
+      modified: new Date(f.realMtime * 1000).toISOString()
     }));
 
     res.json({ status: "OK", count: list.length, files: list });
@@ -114,11 +133,11 @@ app.get("/run", async (req, res) => {
       password: process.env.SFTP_PASS,
     });
 
-    const files = (await sftp.list(remoteDir)).filter(f => f.name.endsWith(".zpaq"));
+    let files = (await sftp.list(remoteDir)).filter(f => f.name.endsWith(".zpaq"));
     if (!files.length) throw new Error("Geen .zpaq-bestanden gevonden");
 
-    // Gebruik correcte tijdsveld
-    files.sort((a, b) => (b.attrs?.mtime || b.modifyTime) - (a.attrs?.mtime || a.modifyTime));
+    files = await enrichWithRealMtime(sftp, remoteDir, files);
+    files.sort((a, b) => b.realMtime - a.realMtime);
     const latest = files[0];
     const localPath = path.join(localDir, latest.name);
 
@@ -134,7 +153,7 @@ app.get("/run", async (req, res) => {
 
     await sftp.end();
 
-    const backupDateIso = new Date((latest.attrs?.mtime || latest.modifyTime) * 1000).toISOString();
+    const backupDateIso = new Date(latest.realMtime * 1000).toISOString();
     console.log("Backupdatum:", backupDateIso);
 
     res.setHeader("X-Backup-Date", backupDateIso);
