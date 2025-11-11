@@ -141,14 +141,22 @@ app.get("/run", async (req, res) => {
     const latest = files[0];
     const localPath = path.join(localDir, latest.name);
 
-    // BETROUWBARE DOWNLOAD
-    const writeStream = fs.createWriteStream(localPath);
-    await sftp.get(`${remoteDir}/${latest.name}`, writeStream);
+    const remoteFile = `${remoteDir}/${latest.name}`;
+    console.log("Start download:", remoteFile);
 
-    // Controleer bestandsgrootte
+    // ---- VEILIGE DOWNLOAD ----
+    const fileBuffer = await sftp.get(remoteFile);
+    if (!fileBuffer || !Buffer.isBuffer(fileBuffer) || fileBuffer.length === 0)
+      throw new Error("Download mislukt of leeg bestand ontvangen");
+
+    fs.writeFileSync(localPath, fileBuffer);
+
+    // Controleer bestandsgrootte exact
     const stats = fs.statSync(localPath);
-    if (stats.size < latest.size) {
-      throw new Error(`Incomplete download: ${stats.size} van ${latest.size} bytes`);
+    if (stats.size !== latest.size) {
+      throw new Error(
+        `Ongelijke bestandsgrootte: lokaal ${stats.size} vs remote ${latest.size}`
+      );
     }
 
     await sftp.end();
@@ -161,15 +169,17 @@ app.get("/run", async (req, res) => {
     res.setHeader("Content-Disposition", `attachment; filename="${latest.name}"`);
     res.setHeader("Content-Type", "application/octet-stream");
 
-    res.setHeader("X-Backup-Meta", JSON.stringify({
-      filename: latest.name,
-      modified: backupDateIso,
-      sizeBytes: latest.size
-    }));
+    res.setHeader(
+      "X-Backup-Meta",
+      JSON.stringify({
+        filename: latest.name,
+        modified: backupDateIso,
+        sizeBytes: latest.size,
+      })
+    );
 
     const fileStream = fs.createReadStream(localPath);
     fileStream.pipe(res);
-
   } catch (err) {
     console.error("Fout:", err.message);
     res.status(500).json({ status: "Error", error: err.message });
