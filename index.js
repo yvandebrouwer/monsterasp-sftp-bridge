@@ -42,15 +42,17 @@ app.get("/meta", async (req, res) => {
     const files = (await sftp.list(remoteDir)).filter(f => f.name.endsWith(".zpaq"));
     if (!files.length) throw new Error("Geen .zpaq-bestanden gevonden");
 
-    files.sort((a, b) => b.modifyTime - a.modifyTime);
+    // Gebruik betrouwbare mtime
+    files.sort((a, b) => (b.attrs?.mtime || b.modifyTime) - (a.attrs?.mtime || a.modifyTime));
     const latest = files[0];
+
     await sftp.end();
 
     res.json({
       status: "OK",
       filename: latest.name,
       sizeBytes: latest.size,
-      modified: new Date(latest.modifyTime).toISOString(),
+      modified: new Date((latest.attrs?.mtime || latest.modifyTime) * 1000).toISOString(),
       message: "Laatste backup-info succesvol opgehaald"
     });
   } catch (err) {
@@ -77,13 +79,13 @@ app.get("/list", async (req, res) => {
     const files = (await sftp.list(remoteDir)).filter(f => f.name.endsWith(".zpaq"));
     if (!files.length) throw new Error("Geen .zpaq-bestanden gevonden");
 
-    files.sort((a, b) => b.modifyTime - a.modifyTime);
+    files.sort((a, b) => (b.attrs?.mtime || b.modifyTime) - (a.attrs?.mtime || a.modifyTime));
     await sftp.end();
 
     const list = files.map(f => ({
       filename: f.name,
       sizeBytes: f.size,
-      modified: new Date(f.modifyTime).toISOString()
+      modified: new Date((f.attrs?.mtime || f.modifyTime) * 1000).toISOString()
     }));
 
     res.json({ status: "OK", count: list.length, files: list });
@@ -115,7 +117,8 @@ app.get("/run", async (req, res) => {
     const files = (await sftp.list(remoteDir)).filter(f => f.name.endsWith(".zpaq"));
     if (!files.length) throw new Error("Geen .zpaq-bestanden gevonden");
 
-    files.sort((a, b) => b.modifyTime - a.modifyTime);
+    // Gebruik correcte tijdsveld
+    files.sort((a, b) => (b.attrs?.mtime || b.modifyTime) - (a.attrs?.mtime || a.modifyTime));
     const latest = files[0];
     const localPath = path.join(localDir, latest.name);
 
@@ -131,7 +134,7 @@ app.get("/run", async (req, res) => {
 
     await sftp.end();
 
-    const backupDateIso = new Date(latest.modifyTime).toISOString();
+    const backupDateIso = new Date((latest.attrs?.mtime || latest.modifyTime) * 1000).toISOString();
     console.log("Backupdatum:", backupDateIso);
 
     res.setHeader("X-Backup-Date", backupDateIso);
