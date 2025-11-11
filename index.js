@@ -37,17 +37,36 @@ async function enrichWithRealMtime(sftp, remoteDir, files) {
 }
 
 // ---------------------------
-// VEILIGE DOWNLOAD MET CHECKSUM
+// VEILIGE DOWNLOAD MET CHECKSUM (Buffer + Stream ondersteuning)
 // ---------------------------
 async function safeDownloadWithChecksum(sftp, remoteFile, localPath, expectedSize) {
   return new Promise(async (resolve, reject) => {
     try {
-      const readStream = await sftp.get(remoteFile);
+      const data = await sftp.get(remoteFile);
+
+      // 🔹 Als het een Buffer is
+      if (Buffer.isBuffer(data)) {
+        fs.writeFileSync(localPath, data);
+        const hash = crypto.createHash("sha1").update(data).digest("hex");
+        const stats = fs.statSync(localPath);
+
+        if (stats.size !== expectedSize) {
+          reject(new Error(`Incomplete download: lokaal ${stats.size} van ${expectedSize} bytes`));
+        } else {
+          console.log(`✔ Download volledig (${stats.size} bytes)`);
+          console.log(`✔ SHA1: ${hash}`);
+          resolve(hash);
+        }
+        return;
+      }
+
+      // 🔹 Als het een Stream is
+      const readStream = data;
       const hash = crypto.createHash("sha1");
       const pass = new stream.PassThrough();
       const writeStream = fs.createWriteStream(localPath);
-
       let bytes = 0;
+
       readStream
         .on("data", chunk => {
           bytes += chunk.length;
@@ -181,7 +200,6 @@ app.get("/run", async (req, res) => {
     const remoteFile = `${remoteDir}/${latest.name}`;
 
     console.log("Start download:", remoteFile);
-
     await safeDownloadWithChecksum(sftp, remoteFile, localPath, latest.size);
     await sftp.end();
 
