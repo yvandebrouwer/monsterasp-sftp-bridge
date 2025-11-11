@@ -3,10 +3,32 @@ import Client from "ssh2-sftp-client";
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
-import stream from "stream";
 
 const app = express();
 const PORT = process.env.PORT || 10000;
+const LOG_PATH = "/tmp/bridge.log";
+
+// ---------------------------
+// LOGFUNCTIE – schrijft naar console én bestand
+// ---------------------------
+function logLine(line) {
+  const stamp = new Date().toISOString();
+  const text = `[${stamp}] ${line}\n`;
+  console.log(line);
+  try {
+    fs.appendFileSync(LOG_PATH, text);
+  } catch {}
+}
+
+// Endpoint om logs te lezen
+app.get("/logs", (req, res) => {
+  try {
+    const data = fs.readFileSync(LOG_PATH, "utf8");
+    res.type("text/plain").send(data.slice(-8000)); // laatste 8000 tekens
+  } catch {
+    res.type("text/plain").send("Nog geen logbestand of geen schrijfrechten.");
+  }
+});
 
 // ---------------------------
 // ALGEMENE INSTELLINGEN
@@ -37,69 +59,10 @@ async function enrichWithRealMtime(sftp, remoteDir, files) {
 }
 
 // ---------------------------
-// VEILIGE DOWNLOAD MET CHECKSUM (Buffer + Stream ondersteuning)
-// ---------------------------
-async function safeDownloadWithChecksum(sftp, remoteFile, localPath, expectedSize) {
-  return new Promise(async (resolve, reject) => {
-    try {
-      const data = await sftp.get(remoteFile);
-
-      // 🔹 Als het een Buffer is
-      if (Buffer.isBuffer(data)) {
-        fs.writeFileSync(localPath, data);
-        const hash = crypto.createHash("sha1").update(data).digest("hex");
-        const stats = fs.statSync(localPath);
-
-        if (stats.size !== expectedSize) {
-          reject(new Error(`Incomplete download: lokaal ${stats.size} van ${expectedSize} bytes`));
-        } else {
-          console.log(`✔ Download volledig (${stats.size} bytes)`);
-          console.log(`✔ SHA1: ${hash}`);
-          resolve(hash);
-        }
-        return;
-      }
-
-      // 🔹 Als het een Stream is
-      const readStream = data;
-      const hash = crypto.createHash("sha1");
-      const pass = new stream.PassThrough();
-      const writeStream = fs.createWriteStream(localPath);
-      let bytes = 0;
-
-      readStream
-        .on("data", chunk => {
-          bytes += chunk.length;
-          hash.update(chunk);
-          pass.write(chunk);
-        })
-        .on("end", () => pass.end())
-        .on("error", err => reject(err));
-
-      pass.pipe(writeStream);
-
-      writeStream.on("finish", () => {
-        const digest = hash.digest("hex");
-        const stats = fs.statSync(localPath);
-
-        if (stats.size !== expectedSize) {
-          reject(new Error(`Incomplete download: lokaal ${stats.size} van ${expectedSize} bytes`));
-        } else {
-          console.log(`✔ Download volledig (${stats.size} bytes)`);
-          console.log(`✔ SHA1: ${digest}`);
-          resolve(digest);
-        }
-      });
-    } catch (err) {
-      reject(err);
-    }
-  });
-}
-
-// ---------------------------
 // /check
 // ---------------------------
 app.get("/check", (req, res) => {
+  logLine("/check aangeroepen");
   res.json({ status: "OK", message: "Bridge werkt correct" });
 });
 
@@ -125,6 +88,8 @@ app.get("/meta", async (req, res) => {
     const latest = files[0];
     await sftp.end();
 
+    logLine(`/meta: laatste bestand ${latest.name} (${latest.size} bytes)`);
+
     res.json({
       status: "OK",
       filename: latest.name,
@@ -133,7 +98,7 @@ app.get("/meta", async (req, res) => {
       message: "Laatste backup-info succesvol opgehaald"
     });
   } catch (err) {
-    console.error("Fout bij /meta:", err.message);
+    logLine("❌ Fout bij /meta: " + err.message);
     res.status(500).json({ status: "Error", error: err.message });
   }
 });
@@ -159,6 +124,8 @@ app.get("/list", async (req, res) => {
     files.sort((a, b) => b.realMtime - a.realMtime);
     await sftp.end();
 
+    logLine(`/list: ${files.length} bestanden gevonden`);
+
     const list = files.map(f => ({
       filename: f.name,
       sizeBytes: f.size,
@@ -167,13 +134,13 @@ app.get("/list", async (req, res) => {
 
     res.json({ status: "OK", count: list.length, files: list });
   } catch (err) {
-    console.error("Fout bij /list:", err.message);
+    logLine("❌ Fout bij /list: " + err.message);
     res.status(500).json({ status: "Error", error: err.message });
   }
 });
 
 // ---------------------------
-// /run
+// /run  (met logging + fastGet + checksum)
 // ---------------------------
 app.get("/run", async (req, res) => {
   const sftp = new Client();
@@ -182,6 +149,7 @@ app.get("/run", async (req, res) => {
 
   try {
     fs.mkdirSync(localDir, { recursive: true });
+    logLine("===== /run gestart =====");
 
     await sftp.connect({
       host: "bh2.siteasp.net",
@@ -199,12 +167,36 @@ app.get("/run", async (req, res) => {
     const localPath = path.join(localDir, latest.name);
     const remoteFile = `${remoteDir}/${latest.name}`;
 
-    console.log("Start download:", remoteFile);
-    await safeDownloadWithChecksum(sftp, remoteFile, localPath, latest.size);
+    logLine("Start download: " + remoteFile);
+
+    const remoteStat = await sftp.stat(remoteFile);
+    logLine("Remote size: " + remoteStat.size);
+
+    await sftp.fastGet(remoteFile, localPath, {
+      concurrency: 1,
+      chunkSize: 4 * 1024 * 1024,
+      step: (transferred, chunk, total) => {
+        if (transferred % (10 * 1024 * 1024) < 4 * 1024 * 1024) {
+          logLine(`Progress: ${transferred}/${total} bytes`);
+        }
+      }
+    });
+
+    const localStat = fs.statSync(localPath);
+    logLine("Local size: " + localStat.size);
+
+    if (localStat.size !== remoteStat.size) {
+      throw new Error(`Incomplete download: lokaal ${localStat.size} van ${remoteStat.size} bytes`);
+    }
+
+    const fileBuffer = fs.readFileSync(localPath);
+    const sha1 = crypto.createHash("sha1").update(fileBuffer).digest("hex");
+    logLine("✔ Download volledig, SHA1=" + sha1);
+
     await sftp.end();
 
     const backupDateIso = new Date(latest.realMtime * 1000).toISOString();
-    console.log("Backupdatum:", backupDateIso);
+    logLine("Backupdatum: " + backupDateIso);
 
     res.setHeader("X-Backup-Date", backupDateIso);
     res.setHeader("Access-Control-Expose-Headers", "X-Backup-Date");
@@ -213,13 +205,14 @@ app.get("/run", async (req, res) => {
     res.setHeader("X-Backup-Meta", JSON.stringify({
       filename: latest.name,
       modified: backupDateIso,
-      sizeBytes: latest.size
+      sizeBytes: latest.size,
+      sha1: sha1
     }));
 
     const fileStream = fs.createReadStream(localPath);
     fileStream.pipe(res);
   } catch (err) {
-    console.error("Fout:", err.message);
+    logLine("❌ Fout in /run: " + err.message);
     res.status(500).json({ status: "Error", error: err.message });
   }
 });
@@ -227,4 +220,4 @@ app.get("/run", async (req, res) => {
 // ---------------------------
 // SERVER STARTEN
 // ---------------------------
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => logLine(`Server running on port ${PORT}`));
