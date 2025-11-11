@@ -18,14 +18,14 @@ app.use((req, res, next) => {
 app.get("/", (req, res) => res.send("✅ MonsterASP SFTP Bridge OK"));
 
 // ---------------------------
-// /check -> eenvoudige statuscontrole
+// /check
 // ---------------------------
 app.get("/check", async (req, res) => {
   res.json({ status: "OK", message: "Bridge werkt correct" });
 });
 
 // ---------------------------
-// /meta -> alleen metadata (geen download)
+// /meta
 // ---------------------------
 app.get("/meta", async (req, res) => {
   const sftp = new Client();
@@ -60,7 +60,7 @@ app.get("/meta", async (req, res) => {
 });
 
 // ---------------------------
-// /list -> lijst van alle .zpaq-bestanden
+// /list
 // ---------------------------
 app.get("/list", async (req, res) => {
   const sftp = new Client();
@@ -95,7 +95,7 @@ app.get("/list", async (req, res) => {
 });
 
 // ---------------------------
-// /run -> download van laatste backup
+// /run
 // ---------------------------
 app.get("/run", async (req, res) => {
   const sftp = new Client();
@@ -119,7 +119,16 @@ app.get("/run", async (req, res) => {
     const latest = files[0];
     const localPath = path.join(localDir, latest.name);
 
-    await sftp.fastGet(`${remoteDir}/${latest.name}`, localPath);
+    // BETROUWBARE DOWNLOAD
+    const writeStream = fs.createWriteStream(localPath);
+    await sftp.get(`${remoteDir}/${latest.name}`, writeStream);
+
+    // Controleer bestandsgrootte
+    const stats = fs.statSync(localPath);
+    if (stats.size < latest.size) {
+      throw new Error(`Incomplete download: ${stats.size} van ${latest.size} bytes`);
+    }
+
     await sftp.end();
 
     const backupDateIso = new Date(latest.modifyTime).toISOString();
