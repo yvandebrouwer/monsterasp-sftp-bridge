@@ -7,43 +7,43 @@ import crypto from "crypto";
 const app = express();
 const PORT = process.env.PORT || 10000;
 const LOG_PATH = "/tmp/bridge.log";
+const BACKUP_DIR = "/tmp/backups";
 
 // ---------------------------
-// LOGFUNCTIE – schrijft naar console én bestand
+// LOGFUNCTIE
 // ---------------------------
 function logLine(line) {
   const stamp = new Date().toISOString();
   const text = `[${stamp}] ${line}\n`;
   console.log(line);
-  try {
-    fs.appendFileSync(LOG_PATH, text);
-  } catch {}
+  try { fs.appendFileSync(LOG_PATH, text); } catch {}
 }
 
-// Endpoint om logs te lezen
+// endpoint om logs te lezen
 app.get("/logs", (req, res) => {
   try {
     const data = fs.readFileSync(LOG_PATH, "utf8");
-    res.type("text/plain").send(data.slice(-8000)); // laatste 8000 tekens
+    res.type("text/plain").send(data.slice(-8000));
   } catch {
     res.type("text/plain").send("Nog geen logbestand of geen schrijfrechten.");
   }
 });
 
+// maakt bestanden direct bereikbaar
+app.use("/files", express.static(BACKUP_DIR));
+
 // ---------------------------
-// ALGEMENE INSTELLINGEN
+// ALGEMEEN
 // ---------------------------
 app.use((req, res, next) => {
-  res.setHeader("Access-Control-Expose-Headers", "X-Backup-Date");
   res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Expose-Headers", "X-Backup-Date");
   next();
 });
 
 app.get("/", (req, res) => res.send("✅ MonsterASP SFTP Bridge OK"));
 
-// ---------------------------
-// Functie om echte mtime op te halen via sftp.stat()
-// ---------------------------
+// hulpfunctie voor mtime
 async function enrichWithRealMtime(sftp, remoteDir, files) {
   const result = [];
   for (const f of files) {
@@ -57,14 +57,6 @@ async function enrichWithRealMtime(sftp, remoteDir, files) {
   }
   return result;
 }
-
-// ---------------------------
-// /check
-// ---------------------------
-app.get("/check", (req, res) => {
-  logLine("/check aangeroepen");
-  res.json({ status: "OK", message: "Bridge werkt correct" });
-});
 
 // ---------------------------
 // /meta
@@ -88,14 +80,13 @@ app.get("/meta", async (req, res) => {
     const latest = files[0];
     await sftp.end();
 
-    logLine(`/meta: laatste bestand ${latest.name} (${latest.size} bytes)`);
+    logLine(`/meta: laatste bestand ${latest.name}`);
 
     res.json({
       status: "OK",
       filename: latest.name,
       sizeBytes: latest.size,
-      modified: new Date(latest.realMtime * 1000).toISOString(),
-      message: "Laatste backup-info succesvol opgehaald"
+      modified: new Date(latest.realMtime * 1000).toISOString()
     });
   } catch (err) {
     logLine("❌ Fout bij /meta: " + err.message);
@@ -124,15 +115,15 @@ app.get("/list", async (req, res) => {
     files.sort((a, b) => b.realMtime - a.realMtime);
     await sftp.end();
 
-    logLine(`/list: ${files.length} bestanden gevonden`);
-
-    const list = files.map(f => ({
-      filename: f.name,
-      sizeBytes: f.size,
-      modified: new Date(f.realMtime * 1000).toISOString()
-    }));
-
-    res.json({ status: "OK", count: list.length, files: list });
+    res.json({
+      status: "OK",
+      count: files.length,
+      files: files.map(f => ({
+        filename: f.name,
+        sizeBytes: f.size,
+        modified: new Date(f.realMtime * 1000).toISOString()
+      }))
+    });
   } catch (err) {
     logLine("❌ Fout bij /list: " + err.message);
     res.status(500).json({ status: "Error", error: err.message });
@@ -140,15 +131,14 @@ app.get("/list", async (req, res) => {
 });
 
 // ---------------------------
-// /run  (met logging + fastGet + checksum)
+// /run
 // ---------------------------
 app.get("/run", async (req, res) => {
   const sftp = new Client();
   const remoteDir = "/";
-  const localDir = "/tmp/backups";
 
   try {
-    fs.mkdirSync(localDir, { recursive: true });
+    fs.mkdirSync(BACKUP_DIR, { recursive: true });
     logLine("===== /run gestart =====");
 
     await sftp.connect({
@@ -164,8 +154,8 @@ app.get("/run", async (req, res) => {
     files = await enrichWithRealMtime(sftp, remoteDir, files);
     files.sort((a, b) => b.realMtime - a.realMtime);
     const latest = files[0];
-    const localPath = path.join(localDir, latest.name);
     const remoteFile = `${remoteDir}/${latest.name}`;
+    const localPath = path.join(BACKUP_DIR, latest.name);
 
     logLine("Start download: " + remoteFile);
 
@@ -195,22 +185,19 @@ app.get("/run", async (req, res) => {
 
     await sftp.end();
 
-    const backupDateIso = new Date(latest.realMtime * 1000).toISOString();
-    logLine("Backupdatum: " + backupDateIso);
+    const backupDateIso = new Date().toISOString(); // gebruik nu, niet foutieve serverdatum
+    const downloadUrl = `https://monsterasp-sftp-bridge.onrender.com/files/${latest.name}`;
 
-    res.setHeader("X-Backup-Date", backupDateIso);
-    res.setHeader("Access-Control-Expose-Headers", "X-Backup-Date");
-    res.setHeader("Content-Disposition", `attachment; filename="${latest.name}"`);
-    res.setHeader("Content-Type", "application/octet-stream");
-    res.setHeader("X-Backup-Meta", JSON.stringify({
+    logLine(`Klaar. Bestand beschikbaar via: ${downloadUrl}`);
+
+    res.json({
+      status: "OK",
       filename: latest.name,
-      modified: backupDateIso,
       sizeBytes: latest.size,
-      sha1: sha1
-    }));
-
-    const fileStream = fs.createReadStream(localPath);
-    fileStream.pipe(res);
+      modified: backupDateIso,
+      sha1: sha1,
+      downloadUrl: downloadUrl
+    });
   } catch (err) {
     logLine("❌ Fout in /run: " + err.message);
     res.status(500).json({ status: "Error", error: err.message });
@@ -218,6 +205,6 @@ app.get("/run", async (req, res) => {
 });
 
 // ---------------------------
-// SERVER STARTEN
+// SERVER START
 // ---------------------------
 app.listen(PORT, () => logLine(`Server running on port ${PORT}`));
