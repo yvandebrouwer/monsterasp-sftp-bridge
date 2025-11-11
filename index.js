@@ -2,6 +2,8 @@ import express from "express";
 import Client from "ssh2-sftp-client";
 import fs from "fs";
 import path from "path";
+import crypto from "crypto";
+import stream from "stream";
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -35,9 +37,50 @@ async function enrichWithRealMtime(sftp, remoteDir, files) {
 }
 
 // ---------------------------
+// VEILIGE DOWNLOAD MET CHECKSUM
+// ---------------------------
+async function safeDownloadWithChecksum(sftp, remoteFile, localPath, expectedSize) {
+  return new Promise(async (resolve, reject) => {
+    try {
+      const readStream = await sftp.get(remoteFile);
+      const hash = crypto.createHash("sha1");
+      const pass = new stream.PassThrough();
+      const writeStream = fs.createWriteStream(localPath);
+
+      let bytes = 0;
+      readStream
+        .on("data", chunk => {
+          bytes += chunk.length;
+          hash.update(chunk);
+          pass.write(chunk);
+        })
+        .on("end", () => pass.end())
+        .on("error", err => reject(err));
+
+      pass.pipe(writeStream);
+
+      writeStream.on("finish", () => {
+        const digest = hash.digest("hex");
+        const stats = fs.statSync(localPath);
+
+        if (stats.size !== expectedSize) {
+          reject(new Error(`Incomplete download: lokaal ${stats.size} van ${expectedSize} bytes`));
+        } else {
+          console.log(`✔ Download volledig (${stats.size} bytes)`);
+          console.log(`✔ SHA1: ${digest}`);
+          resolve(digest);
+        }
+      });
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+// ---------------------------
 // /check
 // ---------------------------
-app.get("/check", async (req, res) => {
+app.get("/check", (req, res) => {
   res.json({ status: "OK", message: "Bridge werkt correct" });
 });
 
@@ -47,7 +90,6 @@ app.get("/check", async (req, res) => {
 app.get("/meta", async (req, res) => {
   const sftp = new Client();
   const remoteDir = "/";
-
   try {
     await sftp.connect({
       host: "bh2.siteasp.net",
@@ -62,7 +104,6 @@ app.get("/meta", async (req, res) => {
     files = await enrichWithRealMtime(sftp, remoteDir, files);
     files.sort((a, b) => b.realMtime - a.realMtime);
     const latest = files[0];
-
     await sftp.end();
 
     res.json({
@@ -84,7 +125,6 @@ app.get("/meta", async (req, res) => {
 app.get("/list", async (req, res) => {
   const sftp = new Client();
   const remoteDir = "/";
-
   try {
     await sftp.connect({
       host: "bh2.siteasp.net",
@@ -98,7 +138,6 @@ app.get("/list", async (req, res) => {
 
     files = await enrichWithRealMtime(sftp, remoteDir, files);
     files.sort((a, b) => b.realMtime - a.realMtime);
-
     await sftp.end();
 
     const list = files.map(f => ({
@@ -108,7 +147,6 @@ app.get("/list", async (req, res) => {
     }));
 
     res.json({ status: "OK", count: list.length, files: list });
-
   } catch (err) {
     console.error("Fout bij /list:", err.message);
     res.status(500).json({ status: "Error", error: err.message });
@@ -140,25 +178,11 @@ app.get("/run", async (req, res) => {
     files.sort((a, b) => b.realMtime - a.realMtime);
     const latest = files[0];
     const localPath = path.join(localDir, latest.name);
-
     const remoteFile = `${remoteDir}/${latest.name}`;
+
     console.log("Start download:", remoteFile);
 
-    // ---- VEILIGE DOWNLOAD ----
-    const fileBuffer = await sftp.get(remoteFile);
-    if (!fileBuffer || !Buffer.isBuffer(fileBuffer) || fileBuffer.length === 0)
-      throw new Error("Download mislukt of leeg bestand ontvangen");
-
-    fs.writeFileSync(localPath, fileBuffer);
-
-    // Controleer bestandsgrootte exact
-    const stats = fs.statSync(localPath);
-    if (stats.size !== latest.size) {
-      throw new Error(
-        `Ongelijke bestandsgrootte: lokaal ${stats.size} vs remote ${latest.size}`
-      );
-    }
-
+    await safeDownloadWithChecksum(sftp, remoteFile, localPath, latest.size);
     await sftp.end();
 
     const backupDateIso = new Date(latest.realMtime * 1000).toISOString();
@@ -168,15 +192,11 @@ app.get("/run", async (req, res) => {
     res.setHeader("Access-Control-Expose-Headers", "X-Backup-Date");
     res.setHeader("Content-Disposition", `attachment; filename="${latest.name}"`);
     res.setHeader("Content-Type", "application/octet-stream");
-
-    res.setHeader(
-      "X-Backup-Meta",
-      JSON.stringify({
-        filename: latest.name,
-        modified: backupDateIso,
-        sizeBytes: latest.size,
-      })
-    );
+    res.setHeader("X-Backup-Meta", JSON.stringify({
+      filename: latest.name,
+      modified: backupDateIso,
+      sizeBytes: latest.size
+    }));
 
     const fileStream = fs.createReadStream(localPath);
     fileStream.pipe(res);
