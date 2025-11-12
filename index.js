@@ -84,7 +84,10 @@ app.get("/run", async (req, res) => {
       throw new Error("NAS_URL of NAS_USER of NAS_PASS ontbreekt");
     }
 
-    const webdavUrl = `${NAS_URL}${encodeURIComponent(latest.name)}`;
+    // --- 2️⃣ Upload naar NAS via WebDAV ---
+    let base = process.env.NAS_URL.trim();
+    if (base.endsWith('/')) base = base.slice(0, -1);
+    const webdavUrl = `${base}/${latest.name}`;
     process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
     const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 
@@ -116,3 +119,4 @@ app.get("/run", async (req, res) => {
 });
 
 app.listen(PORT, () => logLine(`Server running on port ${PORT}`));
+
