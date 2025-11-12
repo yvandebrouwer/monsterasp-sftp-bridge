@@ -10,6 +10,6 @@
   "dependencies": {
     "express": "^4.19.2",
     "ssh2-sftp-client": "^10.0.1",
-    "googleapis": "^141.0.0"
+    "googleapis": "^136.0.0"
   }
 }
