@@ -3,7 +3,8 @@ import Client from "ssh2-sftp-client";
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
-import { google } from "googleapis";
+import axios from "axios";
+import FormData from "form-data";
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -31,7 +32,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// Endpoint om logs te bekijken
+app.get("/", (req, res) => res.send("✅ MonsterASP → Synology NAS Bridge actief"));
 app.get("/logs", (req, res) => {
   try {
     const data = fs.readFileSync(LOG_PATH, "utf8");
@@ -41,15 +42,12 @@ app.get("/logs", (req, res) => {
   }
 });
 
-app.get("/", (req, res) => res.send("✅ MonsterASP SFTP Bridge actief"));
-
 // ---------------------------
-// /run – download + upload naar Google Drive
+// /run – download + upload naar Synology via WebDAV
 // ---------------------------
 app.get("/run", async (req, res) => {
   const sftp = new Client();
   const remoteDir = "/";
-
   try {
     fs.mkdirSync(BACKUP_DIR, { recursive: true });
     logLine("===== /run gestart =====");
@@ -64,7 +62,6 @@ app.get("/run", async (req, res) => {
     let files = (await sftp.list(remoteDir)).filter(f => f.name.endsWith(".zpaq"));
     if (!files.length) throw new Error("Geen .zpaq-bestanden gevonden");
 
-    // Sorteren op laatste wijziging
     files.sort((a, b) => b.modifyTime - a.modifyTime);
     const latest = files[0];
     const remoteFile = `${remoteDir}/${latest.name}`;
@@ -85,52 +82,39 @@ app.get("/run", async (req, res) => {
     const stats = fs.statSync(localPath);
     logLine(`✔ Download klaar (${stats.size} bytes)`);
 
-    // SHA1 berekenen
     const fileBuffer = fs.readFileSync(localPath);
     const sha1 = crypto.createHash("sha1").update(fileBuffer).digest("hex");
     logLine(`SHA1: ${sha1}`);
 
     // ---------------------------
-    // Upload naar Google Drive
+    // Upload naar Synology via WebDAV
     // ---------------------------
-    const creds = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
-    const auth = new google.auth.GoogleAuth({
-      credentials: creds,
-      scopes: ["https://www.googleapis.com/auth/drive.file"],
-    });
-    const drive = google.drive({ version: "v3", auth });
+    const webdavUrl = `${process.env.NAS_URL}/webdav${process.env.NAS_PATH}/${latest.name}`;
+    logLine(`Upload naar NAS: ${webdavUrl}`);
 
-    const fileMetadata = {
-      name: latest.name,
-      parents: [process.env.GOOGLE_DRIVE_FOLDER_ID],
-    };
-
-    const media = {
-      mimeType: "application/octet-stream",
-      body: fs.createReadStream(localPath),
-    };
-
-    logLine("Upload naar Google Drive gestart...");
-    const driveResp = await drive.files.create({
-      requestBody: fileMetadata,
-      media,
-      fields: "id, webViewLink, name",
-      supportsAllDrives: true // ✅ BELANGRIJK voor gedeelde map
+    const upload = await axios.put(webdavUrl, fs.createReadStream(localPath), {
+      maxBodyLength: Infinity,
+      headers: {
+        "Content-Type": "application/octet-stream",
+      },
+      auth: {
+        username: process.env.NAS_USER,
+        password: process.env.NAS_PASS,
+      },
     });
 
-    const fileId = driveResp.data.id;
-    const fileUrl = driveResp.data.webViewLink;
-    logLine(`✔ Upload voltooid: ${fileUrl}`);
-
-    // Resultaat terugsturen
-    res.json({
-      status: "OK",
-      filename: latest.name,
-      sizeBytes: stats.size,
-      sha1: sha1,
-      driveFileId: fileId,
-      driveUrl: fileUrl,
-    });
+    if (upload.status >= 200 && upload.status < 300) {
+      logLine("✔ Upload naar NAS voltooid");
+      res.json({
+        status: "OK",
+        filename: latest.name,
+        sizeBytes: stats.size,
+        sha1: sha1,
+        nasUrl: webdavUrl,
+      });
+    } else {
+      throw new Error(`Upload mislukt (status ${upload.status})`);
+    }
   } catch (err) {
     logLine("❌ Fout in /run: " + err.message);
     res.status(500).json({ status: "Error", error: err.message });
