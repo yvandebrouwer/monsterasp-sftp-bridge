@@ -115,6 +115,7 @@ app.get("/run", async (req, res) => {
       requestBody: fileMetadata,
       media,
       fields: "id, webViewLink, name",
+      supportsAllDrives: true // ✅ BELANGRIJK voor gedeelde map
     });
 
     const fileId = driveResp.data.id;
