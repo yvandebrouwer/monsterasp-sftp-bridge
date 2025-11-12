@@ -1,15 +1,17 @@
 {
   "name": "monsterasp-sftp-bridge",
   "version": "1.0.0",
-  "description": "Bridge om MonsterASP-backups te downloaden en uploaden naar Synology NAS via WebDAV",
+  "description": "Bridge om MonsterASP-backups via SFTP op te halen en naar NAS te uploaden",
   "type": "module",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
+    "axios": "^1.7.2",
+    "crypto": "^1.0.1",
+    "dotenv": "^16.4.5",
     "express": "^4.19.2",
-    "ssh2-sftp-client": "^10.0.1",
-    "axios": "^1.6.8"
+    "ssh2-sftp-client": "^10.0.1"
   }
 }
