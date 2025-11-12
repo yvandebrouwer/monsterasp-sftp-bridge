@@ -1,13 +1,32 @@
-import dotenv from "dotenv";
-dotenv.config();
-
+import fs from "fs";
 import express from "express";
 import Client from "ssh2-sftp-client";
-import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import axios from "axios";
 import https from "https";
+
+// ✅ Handmatig environment-variabelen laden (Render fix)
+if (!process.env.NAS_URL || !process.env.NAS_USER) {
+  try {
+    const envFile = "/opt/render/project/src/.env";
+    if (fs.existsSync(envFile)) {
+      const lines = fs.readFileSync(envFile, "utf8").split(/\r?\n/);
+      for (const line of lines) {
+        const [k, v] = line.split("=");
+        if (k && v && !process.env[k]) process.env[k.trim()] = v.trim();
+      }
+    }
+  } catch (err) {
+    console.log("Kon .env niet lezen:", err.message);
+  }
+}
+
+console.log("DEBUG: handmatig geladen:", {
+  NAS_URL: process.env.NAS_URL,
+  NAS_USER: process.env.NAS_USER,
+  NAS_PASS: process.env.NAS_PASS ? "(ingesteld)" : "LEEG"
+});
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -22,11 +41,6 @@ function logLine(line) {
     fs.appendFileSync(LOG_PATH, text);
   } catch {}
 }
-
-logLine("DEBUG: environment geladen:");
-logLine("NAS_URL=" + process.env.NAS_URL);
-logLine("NAS_USER=" + (process.env.NAS_USER || "LEEG"));
-logLine("NAS_PASS=" + (process.env.NAS_PASS ? "(ingesteld)" : "LEEG"));
 
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
