@@ -6,28 +6,39 @@ import crypto from "crypto";
 import axios from "axios";
 import https from "https";
 
-// ✅ Handmatig environment-variabelen laden (Render fix)
-if (!process.env.NAS_URL || !process.env.NAS_USER) {
-  try {
-    const envFile = "/opt/render/project/src/.env";
-    if (fs.existsSync(envFile)) {
-      const lines = fs.readFileSync(envFile, "utf8").split(/\r?\n/);
-      for (const line of lines) {
-        const [k, v] = line.split("=");
-        if (k && v && !process.env[k]) process.env[k.trim()] = v.trim();
-      }
-    }
-  } catch (err) {
-    console.log("Kon .env niet lezen:", err.message);
-  }
+/* ---------- ENV HELPERS (vangen rare KEY-namen met spaties etc.) ---------- */
+function findEnvKey(target) {
+  // Vind exacte match of dezelfde naam zonder spaties/CR/LF
+  const keys = Object.keys(process.env);
+  const norm = s => (s || "").replace(/\s|\r|\n/g, "");
+  let k = keys.find(x => x === target) || keys.find(x => norm(x) === target);
+  return k || null;
+}
+function getEnv(target) {
+  const k = findEnvKey(target);
+  return k ? process.env[k] : undefined;
+}
+function mask(v) {
+  if (!v) return "LEEG";
+  return "(ingesteld)";
+}
+function logEnvSnapshot() {
+  const keys = Object.keys(process.env)
+    .filter(k => /^(NAS|SFTP|PORT)/.test(k.replace(/\s/g, "")))  // toon alleen relevante
+    .sort();
+
+  const shown = keys.map(k => {
+    const showValue =
+      /PASS|SECRET|TOKEN/i.test(k) ? "(ingesteld)" : (process.env[k] || "LEEG");
+    return `${JSON.stringify(k)} = ${showValue}`;
+  });
+
+  console.log("==== ENV SNAPSHOT (relevante keys) ====");
+  for (const line of shown) console.log(line);
+  console.log("=======================================");
 }
 
-console.log("DEBUG: handmatig geladen:", {
-  NAS_URL: process.env.NAS_URL,
-  NAS_USER: process.env.NAS_USER,
-  NAS_PASS: process.env.NAS_PASS ? "(ingesteld)" : "LEEG"
-});
-
+/* ---------- App ---------- */
 const app = express();
 const PORT = process.env.PORT || 10000;
 const BACKUP_DIR = "/tmp/backups";
@@ -37,9 +48,7 @@ function logLine(line) {
   const stamp = new Date().toISOString();
   const text = `[${stamp}] ${line}\n`;
   console.log(line);
-  try {
-    fs.appendFileSync(LOG_PATH, text);
-  } catch {}
+  try { fs.appendFileSync(LOG_PATH, text); } catch {}
 }
 
 app.use((req, res, next) => {
@@ -53,7 +62,7 @@ app.get("/", (req, res) => res.send("✅ MonsterASP → Synology NAS Bridge acti
 app.get("/logs", (req, res) => {
   try {
     const data = fs.readFileSync(LOG_PATH, "utf8");
-    res.type("text/plain").send(data.slice(-8000));
+    res.type("text/plain").send(data.slice(-12000));
   } catch {
     res.type("text/plain").send("Nog geen logbestand of geen schrijfrechten.");
   }
@@ -65,12 +74,18 @@ app.get("/run", async (req, res) => {
     fs.mkdirSync(BACKUP_DIR, { recursive: true });
     logLine("===== /run gestart =====");
 
-    // --- 1️⃣ Download laatste .zpaq via SFTP ---
+    // 1) SFTP download
+    const SFTP_USER = getEnv("SFTP_USER");
+    const SFTP_PASS = getEnv("SFTP_PASS");
+
+    logLine(`SFTP_USER=${SFTP_USER ? "(ingesteld)" : "LEEG"}`);
+    if (!SFTP_USER || !SFTP_PASS) throw new Error("SFTP_USER/SFTP_PASS ontbreken");
+
     await sftp.connect({
       host: "bh2.siteasp.net",
       port: 22,
-      username: process.env.SFTP_USER,
-      password: process.env.SFTP_PASS,
+      username: SFTP_USER,
+      password: SFTP_PASS,
     });
 
     const files = (await sftp.list("/")).filter(f => f.name.endsWith(".zpaq"));
@@ -87,11 +102,32 @@ app.get("/run", async (req, res) => {
     const sha1 = crypto.createHash("sha1").update(fs.readFileSync(localPath)).digest("hex");
     logLine(`✔ Download klaar (${stats.size} bytes, SHA1=${sha1})`);
 
-    // --- 2️⃣ Upload naar NAS via WebDAV ---
-    if (!process.env.NAS_URL || !process.env.NAS_USER || !process.env.NAS_PASS)
-      throw new Error("NAS_URL of NAS_USER of NAS_PASS ontbreekt");
+    // 2) WebDAV upload naar NAS
+    // Toon *alle* relevante env (voor diagnose)
+    logEnvSnapshot();
 
-    const webdavUrl = `${process.env.NAS_URL}/${latest.name}`;
+    // Lees NAS-waarden via robuuste helper (vangt KEY-typos/spaties op)
+    let NAS_URL  = getEnv("NAS_URL");
+    let NAS_USER = getEnv("NAS_USER");
+    let NAS_PASS = getEnv("NAS_PASS");
+
+    logLine(`NAS_URL=${NAS_URL || "LEEG"}`);
+    logLine(`NAS_USER=${NAS_USER ? "(ingesteld)" : "LEEG"}`);
+    logLine(`NAS_PASS=${mask(NAS_PASS)}`);
+
+    // Trim en normaliseer URL
+    if (NAS_URL) NAS_URL = NAS_URL.trim();
+    if (NAS_URL && !/^https?:\/\//i.test(NAS_URL)) {
+      throw new Error(`NAS_URL lijkt ongeldig: ${NAS_URL}`);
+    }
+    // Zorg dat NAS_URL exact één trailing slash heeft
+    if (NAS_URL && !NAS_URL.endsWith("/")) NAS_URL = NAS_URL + "/";
+
+    if (!NAS_URL || !NAS_USER || !NAS_PASS) {
+      throw new Error("NAS_URL of NAS_USER of NAS_PASS ontbreekt");
+    }
+
+    const webdavUrl = `${NAS_URL}${encodeURIComponent(latest.name)}`;
     logLine(`Upload naar NAS: ${webdavUrl}`);
 
     process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
@@ -101,15 +137,12 @@ app.get("/run", async (req, res) => {
       httpsAgent,
       maxBodyLength: Infinity,
       headers: { "Content-Type": "application/octet-stream" },
-      auth: {
-        username: process.env.NAS_USER,
-        password: process.env.NAS_PASS,
-      },
+      auth: { username: NAS_USER, password: NAS_PASS },
       validateStatus: () => true,
     });
 
     if (response.status >= 200 && response.status < 300) {
-      logLine("✔ Upload naar NAS voltooid");
+      logLine(`✔ Upload naar NAS voltooid (status ${response.status})`);
       res.json({
         status: "OK",
         filename: latest.name,
