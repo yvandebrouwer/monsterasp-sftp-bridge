@@ -4,7 +4,7 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import axios from "axios";
-import FormData from "form-data";
+import https from "https"; // belangrijk voor SSL bypass
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -33,6 +33,7 @@ app.use((req, res, next) => {
 });
 
 app.get("/", (req, res) => res.send("✅ MonsterASP → Synology NAS Bridge actief"));
+
 app.get("/logs", (req, res) => {
   try {
     const data = fs.readFileSync(LOG_PATH, "utf8");
@@ -48,10 +49,12 @@ app.get("/logs", (req, res) => {
 app.get("/run", async (req, res) => {
   const sftp = new Client();
   const remoteDir = "/";
+
   try {
     fs.mkdirSync(BACKUP_DIR, { recursive: true });
     logLine("===== /run gestart =====");
 
+    // ---- 1. Download laatste .zpaq via SFTP ----
     await sftp.connect({
       host: "bh2.siteasp.net",
       port: 22,
@@ -86,17 +89,16 @@ app.get("/run", async (req, res) => {
     const sha1 = crypto.createHash("sha1").update(fileBuffer).digest("hex");
     logLine(`SHA1: ${sha1}`);
 
-    // ---------------------------
-    // Upload naar Synology via WebDAV
-    // ---------------------------
+    // ---- 2. Upload naar NAS via WebDAV ----
     const webdavUrl = `${process.env.NAS_URL}/webdav${process.env.NAS_PATH}/${latest.name}`;
     logLine(`Upload naar NAS: ${webdavUrl}`);
 
+    const agent = new https.Agent({ rejectUnauthorized: false }); // SSL-check overslaan
+
     const upload = await axios.put(webdavUrl, fs.createReadStream(localPath), {
+      httpsAgent: agent,
       maxBodyLength: Infinity,
-      headers: {
-        "Content-Type": "application/octet-stream",
-      },
+      headers: { "Content-Type": "application/octet-stream" },
       auth: {
         username: process.env.NAS_USER,
         password: process.env.NAS_PASS,
@@ -115,6 +117,7 @@ app.get("/run", async (req, res) => {
     } else {
       throw new Error(`Upload mislukt (status ${upload.status})`);
     }
+
   } catch (err) {
     logLine("❌ Fout in /run: " + err.message);
     res.status(500).json({ status: "Error", error: err.message });
