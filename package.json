@@ -3,8 +3,13 @@
   "version": "1.0.0",
   "description": "Bridge om MonsterASP-backups via SFTP op te halen",
   "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
   "dependencies": {
     "express": "^4.19.2",
-    "ssh2-sftp-client": "^10.0.1"
+    "ssh2-sftp-client": "^10.0.1",
+    "googleapis": "^141.0.0"
   }
 }
