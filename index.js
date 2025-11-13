@@ -149,7 +149,7 @@ app.get("/run", async (req, res) => {
     logLine("✔ Upload naar NAS voltooid: " + newName);
 
     //----------------------------------------------------------------
-    // 4 CLEANUP ZONDER REGEX — ALLEEN 3 LAATSTE OVERHOUDEN
+    // 4 CLEANUP — OP BASIS VAN ECHTE PROPFIND DATUM
     //----------------------------------------------------------------
     try {
       const propfind = await axios.request({
@@ -157,49 +157,38 @@ app.get("/run", async (req, res) => {
         method: "PROPFIND",
         auth: { username: NAS_USER, password: NAS_PASS },
         httpsAgent,
-        headers: { Depth: 1, "Content-Type": "text/xml" },
+        headers: { Depth: 1, "Content-Type": "application/xml" },
         validateStatus: () => true,
       });
 
       const xml = propfind.data;
 
-      let allItems = [...xml.matchAll(/<d:href>(.*?)<\/d:href>/g)]
-        .map(m => decodeURIComponent(m[1]))
-        .map(x => x.split("/").pop())
-        .map(x => x.replace(/\/$/, ""))
-        .filter(x => x && x.endsWith(".zpaq"));
+      // Alle entries eruit halen
+      const entries = [...xml.matchAll(/<d:response>[\s\S]*?<\/d:response>/g)]
+        .map(block => {
+          const href = (block[0].match(/<d:href>(.*?)<\/d:href>/) || [null, null])[1];
+          const mod  = (block[0].match(/<d:getlastmodified>(.*?)<\/d:getlastmodified>/) || [null, null])[1];
 
-      // Timestamp extraheren ZONDER regex
-      function extractTimestamp(filename) {
-        const lastUnderscore = filename.lastIndexOf("_");
-        if (lastUnderscore === -1) return null;
+          if (!href || !mod) return null;
 
-        const timePart = filename.substring(lastUnderscore + 1, filename.length - ".zpaq".length);
+          const name = decodeURIComponent(href).split("/").pop().replace(/\/$/, "");
+          if (!name.endsWith(".zpaq")) return null;
 
-        const cleaned = timePart.replace("_", "-"); // uniform maken
+          const dt = new Date(mod);
+          if (isNaN(dt.getTime())) return null;
 
-        const parts = cleaned.split("-");
-        if (parts.length !== 6) return null;
+          return { name, dt };
+        })
+        .filter(x => x !== null);
 
-        const [Y, M, D, h, m, s] = parts;
-        const dt = new Date(`${Y}-${M}-${D}T${h}:${m}:${s}Z`);
+      // sorteren: nieuwste eerst
+      entries.sort((a, b) => b.dt - a.dt);
 
-        if (isNaN(dt.getTime())) return null;
+      if (entries.length > 3) {
+        const toDelete = entries.slice(3);
 
-        return dt;
-      }
-
-      const parsed = allItems.map(name => ({
-        name,
-        dt: extractTimestamp(name)
-      })).filter(x => x.dt != null);
-
-      parsed.sort((a, b) => b.dt - a.dt); // nieuwste eerst
-
-      if (parsed.length > 3) {
-        const toDelete = parsed.slice(3);
-
-        logLine("Te verwijderen: " + JSON.stringify(toDelete.map(x => x.name)));
+        logLine("Te verwijderen op basis van echte datum: " +
+                JSON.stringify(toDelete.map(x => x.name)));
 
         for (const f of toDelete) {
           const delResp = await axios.delete(`${base}/${f.name}`, {
