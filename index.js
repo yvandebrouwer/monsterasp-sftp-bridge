@@ -42,9 +42,7 @@ async function sendStatusWebhook(type, data) {
       },
       {
         timeout: 10000,
-        headers: {
-          "Content-Type": "application/json"   // ✔ VERPLICHT voor MVC5 model binding
-        }
+        headers: { "Content-Type": "application/json" }
       }
     );
 
@@ -153,7 +151,7 @@ app.get("/run", async (req, res) => {
 
     logLine("✔ Upload naar NAS voltooid");
 
-    // --- 3️⃣ Cleanup op NAS ---
+    // --- 3️⃣ Cleanup op NAS: bewaar 3 nieuwste ---
     try {
       const propfind = await axios.request({
         url: base + "/",
@@ -165,31 +163,33 @@ app.get("/run", async (req, res) => {
       });
 
       const xml = propfind.data;
-      const matches = [...xml.matchAll(/<d:href>(.*?)<\/d:href>/g)];
 
-      let entries = matches
-        .map(m => decodeURIComponent(m[1]))
-        .filter(x => x.endsWith(".zpaq"))
-        .map(x => x.split("/").pop());
+      const entries = [...xml.matchAll(/<d:response>[\s\S]*?<d:href>(.*?)<\/d:href>[\s\S]*?<d:getlastmodified>(.*?)<\/d:getlastmodified>/g)]
+        .map(m => ({
+          name: decodeURIComponent(m[1]).split("/").pop(),
+          modified: new Date(m[2])
+        }))
+        .filter(x => x.name.endsWith(".zpaq"))
+        .sort((a, b) => b.modified - a.modified); // nieuwste eerst
 
       if (entries.length > 3) {
-        entries.sort();
-        const toDelete = entries.slice(0, entries.length - 3);
+        const toDelete = entries.slice(3); // vanaf 4de oudste
 
         for (const f of toDelete) {
-          logLine("Verwijder NAS-bestand: " + f);
-          await axios.delete(`${base}/${f}`, {
+          logLine("Verwijder NAS-bestand: " + f.name);
+          await axios.delete(`${base}/${f.name}`, {
             auth: { username: NAS_USER, password: NAS_PASS },
             httpsAgent,
             validateStatus: () => true,
           });
         }
       }
+
     } catch (cleanupErr) {
       logLine("⚠ Cleanup fout: " + cleanupErr.message);
     }
 
-    // --- 4️⃣ Meld succes via webhook ---
+    // --- 4️⃣ Webhook-melding ---
     await sendStatusWebhook("OK", {
       filename: latest.name,
       sizeBytes: stats.size,
