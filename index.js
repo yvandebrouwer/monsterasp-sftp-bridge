@@ -117,6 +117,35 @@ app.get("/logs", (req, res) => {
   }
 });
 
+app.get("/testmail", async (req, res) => {
+  try {
+    const t = nodemailer.createTransport({
+      host: "smtp.gmail.com",
+      port: 465,
+      secure: true,
+      auth: {
+        user: process.env.GMAIL_USER,
+        pass: process.env.GMAIL_PASS
+      }
+    });
+
+    await t.sendMail({
+      from: process.env.GMAIL_USER,
+      to: "debrouweryvan@gmail.com",
+      subject: "TESTMAIL — Render",
+      text: "Dit is een testmail vanuit jouw Render-bridge."
+    });
+
+    logLine("✉ TESTMAIL verzonden");
+    res.send("✔ Testmail verzonden!");
+  } catch (err) {
+    logLine("❌ Testmail fout: " + err.message);
+    res.status(500).send("❌ Testmail fout: " + err.message);
+  }
+});
+
+
+
 app.get("/run", async (req, res) => {
   const sftp = new Client();
   try {
@@ -239,3 +268,4 @@ app.get("/run", async (req, res) => {
 });
 
 app.listen(PORT, () => logLine(`Server running on port ${PORT}`));
+
