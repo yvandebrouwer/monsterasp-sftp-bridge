@@ -67,7 +67,7 @@ function dumpAllEnv() {
 }
 
 // ==========================================
-// Test of Webhook bereikbaar is
+// Test Webhook
 // ==========================================
 app.get("/testmail", async (req, res) => {
   try {
@@ -123,7 +123,11 @@ app.get("/run", async (req, res) => {
     const sha1 = crypto.createHash("sha1").update(fs.readFileSync(localPath)).digest("hex");
     logLine(`✔ Download klaar (${stats.size} bytes, SHA1=${sha1})`);
 
-    // --- 2️⃣ Upload naar NAS ---
+    // --- 2️⃣ Genereer nieuwe bestandsnaam mét datum ---
+    const stamp = new Date().toISOString().replace(/[:T]/g, "-").split(".")[0];
+    const newName = `${latest.name.replace(".zpaq", "")}_${stamp}.zpaq`;
+
+    // --- 3️⃣ Upload naar NAS ---
     const NAS_URL = process.env.NAS_URL;
     const NAS_USER = process.env.NAS_USER;
     const NAS_PASS = process.env.NAS_PASS;
@@ -134,7 +138,7 @@ app.get("/run", async (req, res) => {
 
     let base = NAS_URL.trim();
     if (base.endsWith("/")) base = base.slice(0, -1);
-    const webdavUrl = `${base}/${latest.name}`;
+    const webdavUrl = `${base}/${newName}`;
 
     process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
     const httpsAgent = new https.Agent({ rejectUnauthorized: false });
@@ -151,11 +155,9 @@ app.get("/run", async (req, res) => {
       throw new Error(`Upload mislukt (${response.status})`);
     }
 
-    logLine("✔ Upload naar NAS voltooid");
+    logLine("✔ Upload naar NAS voltooid: " + newName);
 
-    // ==========================================
-    // 3️⃣ Cleanup — hou ALLEEN 3 nieuwste backups
-    // ==========================================
+    // --- 4️⃣ Cleanup: houd enkel 3 meest recente ---
     try {
       const propfind = await axios.request({
         url: base + "/",
@@ -167,16 +169,16 @@ app.get("/run", async (req, res) => {
       });
 
       const xml = propfind.data;
+      const matches = [...xml.matchAll(/<d:href>(.*?)<\/d:href>/g)];
 
-      // Haal alle .zpaq-bestanden uit de WebDAV response
-      let entries = [...xml.matchAll(/<d:href>(.*?)<\/d:href>/g)]
-        .map(m => decodeURIComponent(m[1]).split("/").pop())
-        .filter(name => name.endsWith(".zpaq"));
-
-      // Sorteer alfabetisch (timestamp in naam → goed)
-      entries.sort();
+      let entries = matches
+        .map(m => decodeURIComponent(m[1]))
+        .filter(x => x.endsWith(".zpaq"))
+        .map(x => x.split("/").pop());
 
       if (entries.length > 3) {
+        // sorteer op naam → datum zit in naam → chronologisch
+        entries.sort();
         const toDelete = entries.slice(0, entries.length - 3);
 
         for (const f of toDelete) {
@@ -192,16 +194,16 @@ app.get("/run", async (req, res) => {
       logLine("⚠ Cleanup fout: " + cleanupErr.message);
     }
 
-    // --- 4️⃣ Meld succes via webhook ---
+    // --- 5️⃣ Webhook naar MVC ---
     await sendStatusWebhook("OK", {
-      filename: latest.name,
+      filename: newName,
       sizeBytes: stats.size,
       sha1
     });
 
     res.json({
       success: true,
-      filename: latest.name,
+      filename: newName,
       sizeBytes: stats.size,
       sha1,
       nasUrl: webdavUrl,
