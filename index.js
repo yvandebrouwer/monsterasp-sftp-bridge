@@ -42,9 +42,7 @@ async function sendStatusWebhook(type, data) {
       },
       {
         timeout: 10000,
-        headers: {
-          "Content-Type": "application/json"
-        }
+        headers: { "Content-Type": "application/json" }
       }
     );
 
@@ -123,7 +121,7 @@ app.get("/run", async (req, res) => {
     const sha1 = crypto.createHash("sha1").update(fs.readFileSync(localPath)).digest("hex");
     logLine(`✔ Download klaar (${stats.size} bytes, SHA1=${sha1})`);
 
-    // --- 2️⃣ Genereer nieuwe bestandsnaam mét datum ---
+    // --- 2️⃣ Nieuwe bestandsnaam mét datum ---
     const stamp = new Date().toISOString().replace(/[:T]/g, "-").split(".")[0];
     const newName = `${latest.name.replace(".zpaq", "")}_${stamp}.zpaq`;
 
@@ -157,7 +155,7 @@ app.get("/run", async (req, res) => {
 
     logLine("✔ Upload naar NAS voltooid: " + newName);
 
-    // --- 4️⃣ Cleanup: houd enkel 3 meest recente ---
+    // --- 4️⃣ Cleanup: houd enkel 3 datum-backups ---
     try {
       const propfind = await axios.request({
         url: base + "/",
@@ -169,32 +167,44 @@ app.get("/run", async (req, res) => {
       });
 
       const xml = propfind.data;
-      const matches = [...xml.matchAll(/<d:href>(.*?)<\/d:href>/g)];
 
-      let entries = matches
+      let allFiles = [...xml.matchAll(/<d:href>(.*?)<\/d:href>/g)]
         .map(m => decodeURIComponent(m[1]))
-        .filter(x => x.endsWith(".zpaq"))
         .map(x => x.split("/").pop());
 
-      if (entries.length > 3) {
-        // sorteer op naam → datum zit in naam → chronologisch
-        entries.sort();
-        const toDelete = entries.slice(0, entries.length - 3);
+      logLine("NAS bestanden gevonden: " + JSON.stringify(allFiles));
+
+      // Neem enkel bestanden MET datum
+      let datedFiles = allFiles.filter(name =>
+        /^.+_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\.zpaq$/.test(name)
+      );
+
+      logLine("Datum-bestanden: " + JSON.stringify(datedFiles));
+
+      if (datedFiles.length > 3) {
+        datedFiles.sort(); // oudste eerst
+        const toDelete = datedFiles.slice(0, datedFiles.length - 3);
+
+        logLine("Te verwijderen: " + JSON.stringify(toDelete));
 
         for (const f of toDelete) {
-          logLine("Verwijder NAS-bestand: " + f);
           await axios.delete(`${base}/${f}`, {
             auth: { username: NAS_USER, password: NAS_PASS },
             httpsAgent,
             validateStatus: () => true,
           });
+
+          logLine("Verwijderd: " + f);
         }
+      } else {
+        logLine("Cleanup niet nodig. Slechts " + datedFiles.length + " bestanden.");
       }
+
     } catch (cleanupErr) {
       logLine("⚠ Cleanup fout: " + cleanupErr.message);
     }
 
-    // --- 5️⃣ Webhook naar MVC ---
+    // --- 5️⃣ Meld succes via webhook ---
     await sendStatusWebhook("OK", {
       filename: newName,
       sizeBytes: stats.size,
