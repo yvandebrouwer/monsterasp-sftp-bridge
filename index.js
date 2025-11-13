@@ -18,7 +18,9 @@ function logLine(line) {
   try { fs.appendFileSync(LOG_PATH, text); } catch {}
 }
 
-// 🔥 NIEUW: stuur status naar jouw MVC-site (in plaats van SMTP)
+// ==========================================
+// 🔥 WEBHOOK → stuurt naar jouw MVC-site
+// ==========================================
 async function sendStatusWebhook(type, data) {
   const url = process.env.MAIL_WEBHOOK_URL;
 
@@ -28,16 +30,23 @@ async function sendStatusWebhook(type, data) {
   }
 
   try {
-    await axios.post(url, {
-      type,
-      filename: data.filename || null,
-      sizeBytes: data.sizeBytes || null,
-      sha1: data.sha1 || null,
-      error: data.error || null,
-      time: new Date().toISOString()
-    }, {
-      timeout: 10000
-    });
+    await axios.post(
+      url,
+      {
+        type,
+        filename: data.filename || null,
+        sizeBytes: data.sizeBytes || null,
+        sha1: data.sha1 || null,
+        error: data.error || null,
+        time: new Date().toISOString()
+      },
+      {
+        timeout: 10000,
+        headers: {
+          "Content-Type": "application/json"   // ✔ VERPLICHT voor MVC5 model binding
+        }
+      }
+    );
 
     logLine("✉ Webhook mailstatus verzonden: " + type);
   } catch (e) {
@@ -57,6 +66,18 @@ function dumpAllEnv() {
   logLine("=== END ENV DUMP ===");
 }
 
+// ==========================================
+// Test of Webhook bereikbaar is
+// ==========================================
+app.get("/testmail", async (req, res) => {
+  try {
+    await sendStatusWebhook("TEST", {});
+    res.send("✔ Webhook-test verzonden!");
+  } catch {
+    res.status(500).send("❌ Webhook-test mislukt");
+  }
+});
+
 app.get("/", (req, res) => res.send("✅ MonsterASP → Synology NAS Bridge actief"));
 
 app.get("/logs", (req, res) => {
@@ -68,16 +89,9 @@ app.get("/logs", (req, res) => {
   }
 });
 
-// Test of webhook bereikt kan worden
-app.get("/testmail", async (req, res) => {
-  try {
-    await sendStatusWebhook("TEST", { filename: null });
-    res.send("✔ Webhook-test verzonden!");
-  } catch {
-    res.status(500).send("❌ Webhook-test mislukt");
-  }
-});
-
+// ==========================================
+// /RUN — hoofdjob
+// ==========================================
 app.get("/run", async (req, res) => {
   const sftp = new Client();
 
@@ -109,7 +123,7 @@ app.get("/run", async (req, res) => {
     const sha1 = crypto.createHash("sha1").update(fs.readFileSync(localPath)).digest("hex");
     logLine(`✔ Download klaar (${stats.size} bytes, SHA1=${sha1})`);
 
-    // --- 2️⃣ Upload naar NAS via WebDAV ---
+    // --- 2️⃣ Upload naar NAS ---
     const NAS_URL = process.env.NAS_URL;
     const NAS_USER = process.env.NAS_USER;
     const NAS_PASS = process.env.NAS_PASS;
@@ -139,7 +153,7 @@ app.get("/run", async (req, res) => {
 
     logLine("✔ Upload naar NAS voltooid");
 
-    // --- 3️⃣ Cleanup: hou enkel 3 laatste backups ---
+    // --- 3️⃣ Cleanup op NAS ---
     try {
       const propfind = await axios.request({
         url: base + "/",
@@ -175,7 +189,7 @@ app.get("/run", async (req, res) => {
       logLine("⚠ Cleanup fout: " + cleanupErr.message);
     }
 
-    // --- 4️⃣ Meld succes aan jouw MVC-site ---
+    // --- 4️⃣ Meld succes via webhook ---
     await sendStatusWebhook("OK", {
       filename: latest.name,
       sizeBytes: stats.size,
@@ -194,7 +208,6 @@ app.get("/run", async (req, res) => {
   } catch (err) {
     logLine("❌ Fout in /run: " + err.message);
 
-    // Webhook melding
     await sendStatusWebhook("ERR", { error: err.message });
 
     res.status(500).json({ success: false, error: err.message });
