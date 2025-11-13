@@ -11,6 +11,9 @@ const PORT = process.env.PORT || 10000;
 const BACKUP_DIR = "/tmp/backups";
 const LOG_PATH = "/tmp/bridge.log";
 
+// ---------------------------------------------------------------
+// LOG
+// ---------------------------------------------------------------
 function logLine(line) {
   const stamp = new Date().toISOString();
   const text = `[${stamp}] ${line}\n`;
@@ -18,9 +21,9 @@ function logLine(line) {
   try { fs.appendFileSync(LOG_PATH, text); } catch {}
 }
 
-// ==========================================
-// 🔥 WEBHOOK → stuurt naar jouw MVC-site
-// ==========================================
+// ---------------------------------------------------------------
+// WEBHOOK NAAR MVC-SITE
+// ---------------------------------------------------------------
 async function sendStatusWebhook(type, data) {
   const url = process.env.MAIL_WEBHOOK_URL;
 
@@ -46,12 +49,14 @@ async function sendStatusWebhook(type, data) {
       }
     );
 
-    logLine("✉ Webhook mailstatus verzonden: " + type);
+    logLine("✉ Webhook verzonden: " + type);
+
   } catch (e) {
     logLine("⚠ Webhook fout: " + e.message);
   }
 }
 
+// ---------------------------------------------------------------
 function dumpAllEnv() {
   const keys = Object.keys(process.env).sort();
   logLine("=== BEGIN COMPLETE ENV DUMP ===");
@@ -64,32 +69,19 @@ function dumpAllEnv() {
   logLine("=== END ENV DUMP ===");
 }
 
-// ==========================================
-// Test Webhook
-// ==========================================
-app.get("/testmail", async (req, res) => {
-  try {
-    await sendStatusWebhook("TEST", {});
-    res.send("✔ Webhook-test verzonden!");
-  } catch {
-    res.status(500).send("❌ Webhook-test mislukt");
-  }
-});
-
+// ---------------------------------------------------------------
+// ROUTES
+// ---------------------------------------------------------------
 app.get("/", (req, res) => res.send("✅ MonsterASP → Synology NAS Bridge actief"));
 
-app.get("/logs", (req, res) => {
-  try {
-    const data = fs.readFileSync(LOG_PATH, "utf8");
-    res.type("text/plain").send(data.slice(-15000));
-  } catch {
-    res.type("text/plain").send("Nog geen logbestand of geen schrijfrechten.");
-  }
+app.get("/testmail", async (req, res) => {
+  await sendStatusWebhook("TEST", {});
+  res.send("✔ Webhook-test verzonden!");
 });
 
-// ==========================================
-// /RUN — hoofdjob
-// ==========================================
+// ---------------------------------------------------------------
+// /RUN — hoofdflow
+// ---------------------------------------------------------------
 app.get("/run", async (req, res) => {
   const sftp = new Client();
 
@@ -98,7 +90,9 @@ app.get("/run", async (req, res) => {
     logLine("===== /run gestart =====");
     dumpAllEnv();
 
-    // --- 1️⃣ Download via SFTP ---
+    // -----------------------------------------------------------
+    // 1️⃣ DOWNLOAD
+    // -----------------------------------------------------------
     await sftp.connect({
       host: "bh2.siteasp.net",
       port: 22,
@@ -109,7 +103,7 @@ app.get("/run", async (req, res) => {
     const files = (await sftp.list("/")).filter(f => f.name.endsWith(".zpaq"));
     if (!files.length) throw new Error("Geen .zpaq-bestanden gevonden");
 
-    files.sort((a, b) => b.modifyTime - a.modifyTime);
+    files.sort((a, b) => b.modifyTime - a.modifyTime); // nieuwste eerst
     const latest = files[0];
     const localPath = path.join(BACKUP_DIR, latest.name);
 
@@ -119,13 +113,18 @@ app.get("/run", async (req, res) => {
 
     const stats = fs.statSync(localPath);
     const sha1 = crypto.createHash("sha1").update(fs.readFileSync(localPath)).digest("hex");
+
     logLine(`✔ Download klaar (${stats.size} bytes, SHA1=${sha1})`);
 
-    // --- 2️⃣ Nieuwe bestandsnaam mét datum ---
+    // -----------------------------------------------------------
+    // 2️⃣ BESTANDSNAAM MET DATUM MAKEN
+    // -----------------------------------------------------------
     const stamp = new Date().toISOString().replace(/[:T]/g, "-").split(".")[0];
     const newName = `${latest.name.replace(".zpaq", "")}_${stamp}.zpaq`;
 
-    // --- 3️⃣ Upload naar NAS ---
+    // -----------------------------------------------------------
+    // 3️⃣ UPLOAD NAAR NAS
+    // -----------------------------------------------------------
     const NAS_URL = process.env.NAS_URL;
     const NAS_USER = process.env.NAS_USER;
     const NAS_PASS = process.env.NAS_PASS;
@@ -136,6 +135,7 @@ app.get("/run", async (req, res) => {
 
     let base = NAS_URL.trim();
     if (base.endsWith("/")) base = base.slice(0, -1);
+
     const webdavUrl = `${base}/${newName}`;
 
     process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
@@ -155,8 +155,11 @@ app.get("/run", async (req, res) => {
 
     logLine("✔ Upload naar NAS voltooid: " + newName);
 
-    // --- 4️⃣ Cleanup: houd enkel 3 datum-backups ---
+    // -----------------------------------------------------------
+    // 4️⃣ CLEANUP — ALLEEN 3 LAATSTE BEWAREN
+    // -----------------------------------------------------------
     try {
+
       const propfind = await axios.request({
         url: base + "/",
         method: "PROPFIND",
@@ -168,21 +171,21 @@ app.get("/run", async (req, res) => {
 
       const xml = propfind.data;
 
+      // Extract alle entries, ook mappen zoals file.zpaq/
       let allFiles = [...xml.matchAll(/<d:href>(.*?)<\/d:href>/g)]
         .map(m => decodeURIComponent(m[1]))
-        .map(x => x.split("/").pop());
+        .map(x => x.split("/").pop())
+        .map(x => x.replace(/\/$/, "")); // <-- Synology fix
 
-      logLine("NAS bestanden gevonden: " + JSON.stringify(allFiles));
-
-      // Neem enkel bestanden MET datum
+      // Filter datum-bestanden
       let datedFiles = allFiles.filter(name =>
-        /^.+_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\.zpaq$/.test(name)
+        /^.+_\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}\.zpaq$/.test(name)
       );
 
-      logLine("Datum-bestanden: " + JSON.stringify(datedFiles));
+      logLine("Datum-bestanden gevonden: " + JSON.stringify(datedFiles));
 
       if (datedFiles.length > 3) {
-        datedFiles.sort(); // oudste eerst
+        datedFiles.sort(); // alfabetisch = chronologisch
         const toDelete = datedFiles.slice(0, datedFiles.length - 3);
 
         logLine("Te verwijderen: " + JSON.stringify(toDelete));
@@ -193,18 +196,17 @@ app.get("/run", async (req, res) => {
             httpsAgent,
             validateStatus: () => true,
           });
-
           logLine("Verwijderd: " + f);
         }
-      } else {
-        logLine("Cleanup niet nodig. Slechts " + datedFiles.length + " bestanden.");
       }
 
     } catch (cleanupErr) {
       logLine("⚠ Cleanup fout: " + cleanupErr.message);
     }
 
-    // --- 5️⃣ Meld succes via webhook ---
+    // -----------------------------------------------------------
+    // 5️⃣ MELD SUCCES AAN MVC
+    // -----------------------------------------------------------
     await sendStatusWebhook("OK", {
       filename: newName,
       sizeBytes: stats.size,
@@ -229,4 +231,5 @@ app.get("/run", async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------
 app.listen(PORT, () => logLine(`Server running on port ${PORT}`));
