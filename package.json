@@ -11,6 +11,7 @@
     "axios": "^1.7.2",
     "crypto": "^1.0.1",
     "express": "^4.19.2",
-    "ssh2-sftp-client": "^10.0.1"
+    "ssh2-sftp-client": "^10.0.1",
+    "nodemailer": "^6.9.0"
   }
 }
