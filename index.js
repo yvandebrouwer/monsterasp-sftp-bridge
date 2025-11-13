@@ -5,6 +5,7 @@ import path from "path";
 import crypto from "crypto";
 import axios from "axios";
 import https from "https";
+import { XMLParser } from "fast-xml-parser";   // <-- NIEUW
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -85,7 +86,7 @@ app.get("/run", async (req, res) => {
     dumpAllEnv();
 
     //----------------------------------------------------------------
-    // DOWNLOAD
+    // 1. DOWNLOAD
     //----------------------------------------------------------------
     await sftp.connect({
       host: "bh2.siteasp.net",
@@ -110,13 +111,13 @@ app.get("/run", async (req, res) => {
     logLine(`✔ Download klaar (${stats.size} bytes, SHA1=${sha1})`);
 
     //----------------------------------------------------------------
-    // NIEUWE BESTANDSNAAM
+    // 2. NIEUWE BESTANDSNAAM
     //----------------------------------------------------------------
     const stamp = new Date().toISOString().replace(/[:T]/g, "-").split(".")[0];
     const newName = `${latest.name.replace(".zpaq", "")}_${stamp}.zpaq`;
 
     //----------------------------------------------------------------
-    // UPLOAD NAAR NAS
+    // 3. UPLOAD NAAR NAS VIA WEBDAV
     //----------------------------------------------------------------
     const NAS_URL = process.env.NAS_URL;
     const NAS_USER = process.env.NAS_USER;
@@ -146,7 +147,7 @@ app.get("/run", async (req, res) => {
     logLine("✔ Upload naar NAS voltooid: " + newName);
 
     //----------------------------------------------------------------
-    // CLEANUP – OP BASIS VAN ECHTE SYNOLOGY DATUM + MAP/FOLDER FIX
+    // 4. CLEANUP — PROPFIND PARSEN MET XMLPARSER
     //----------------------------------------------------------------
     try {
       const propfind = await axios.request({
@@ -154,63 +155,162 @@ app.get("/run", async (req, res) => {
         method: "PROPFIND",
         auth: { username: NAS_USER, password: NAS_PASS },
         httpsAgent,
-        headers: { Depth: 1, "Content-Type": "application/xml" },
+        headers: {
+          Depth: 1,
+          "Content-Type": "application/xml"
+        },
         validateStatus: () => true,
       });
 
       const xml = propfind.data;
 
-      // Extract D:response blokken
-      const blocks = [...xml.matchAll(/<d:response>[\s\S]*?<\/d:response>/g)];
+      const parser = new XMLParser({
+        ignoreAttributes: false,
+        ignoreDeclaration: true,
+        removeNSPrefix: false
+      });
 
-      // Parse entries
-      const entries = blocks.map(block => {
-        const b = block[0];
+      const json = parser.parse(xml);
 
-        const href = (b.match(/<d:href>(.*?)<\/d:href>/) || [null, null])[1];
-        if (!href) return null;
+      // Zoek de multistatus node en responses (ongeacht prefix d:/D:/whatever)
+      function findResponses(obj) {
+        if (!obj || typeof obj !== "object") return null;
 
-        let nameRaw = decodeURIComponent(href).split("/").pop();
-        if (!nameRaw) return null;
+        for (const key of Object.keys(obj)) {
+          const val = obj[key];
+          const lower = key.toLowerCase();
+          if (lower.endsWith("multistatus")) {
+            // hierbinnen moeten de response nodes zitten
+            const resp =
+              val["d:response"] ||
+              val["D:response"] ||
+              val["response"] ||
+              val["ns0:response"];
 
-        const isDir = /<d:collection\s*\/>/.test(b); // map of bestand
+            if (!resp) return [];
+            return Array.isArray(resp) ? resp : [resp];
+          }
 
-        const name = nameRaw.replace(/\/$/, ""); // trailing slash → weg
-
-        if (!name.endsWith(".zpaq")) return null;
-
-        const modText = (b.match(/<d:getlastmodified>(.*?)<\/d:getlastmodified>/) || [null, null])[1];
-        if (!modText) return null;
-
-        const dt = new Date(modText);
-        if (isNaN(dt.getTime())) return null;
-
-        return { name, dt, isDir };
-      }).filter(x => x !== null);
-
-      // sorteer op echte datum (nieuwste eerst)
-      entries.sort((a, b) => b.dt - a.dt);
-
-      // houd 3 nieuwste
-      const toDelete = entries.slice(3);
-
-      if (toDelete.length) {
-        logLine("Te verwijderen: " + JSON.stringify(toDelete.map(x => x.name)));
+          if (typeof val === "object") {
+            const r = findResponses(val);
+            if (r) return r;
+          }
+        }
+        return null;
       }
 
-      // DELETE uitvoeren
-      for (const f of toDelete) {
-        const target = `${base}/${f.name}`;
+      const responses = findResponses(json) || [];
+      logLine("PROPFIND responses ontvangen: " + responses.length);
 
-        const delResp = await axios({
-          url: target,
-          method: "DELETE",
-          auth: { username: NAS_USER, password: NAS_PASS },
-          httpsAgent,
-          validateStatus: () => true
-        });
+      // Helper: uit één response href, lastmodified en resourcetype halen
+      function parseEntry(resp) {
+        if (!resp) return null;
 
-        logLine(`DELETE ${f.isDir ? "folder" : "file"}: ${f.name} → HTTP ${delResp.status}`);
+        const href =
+          resp["d:href"] ||
+          resp["D:href"] ||
+          resp["href"] ||
+          resp["ns0:href"];
+
+        if (!href) return null;
+
+        // propstat kan array of object zijn
+        const propstatRaw =
+          resp["d:propstat"] ||
+          resp["D:propstat"] ||
+          resp["propstat"] ||
+          resp["ns0:propstat"];
+
+        const propstats = Array.isArray(propstatRaw)
+          ? propstatRaw
+          : propstatRaw ? [propstatRaw] : [];
+
+        let props = null;
+        for (const ps of propstats) {
+          const status = (ps["d:status"] || ps["D:status"] || ps["status"] || "").toString();
+          if (!status || status.indexOf("200") !== -1) {
+            props =
+              ps["d:prop"] ||
+              ps["D:prop"] ||
+              ps["prop"] ||
+              ps["ns0:prop"] ||
+              ps;
+            break;
+          }
+        }
+        if (!props) return null;
+
+        // getlastmodified zoeken (ongeacht prefix)
+        let lastmod = null;
+        let resourcetype = null;
+
+        for (const k of Object.keys(props)) {
+          const lk = k.toLowerCase();
+          if (!lastmod && lk.endsWith("getlastmodified")) {
+            lastmod = props[k];
+          }
+          if (!resourcetype && lk.endsWith("resourcetype")) {
+            resourcetype = props[k];
+          }
+        }
+
+        if (!lastmod) return null;
+
+        const dt = new Date(lastmod);
+        if (isNaN(dt.getTime())) return null;
+
+        // is folder / collectie?
+        let isDir = false;
+        if (resourcetype && typeof resourcetype === "object") {
+          for (const k of Object.keys(resourcetype)) {
+            if (k.toLowerCase().includes("collection")) {
+              isDir = true;
+              break;
+            }
+          }
+        }
+
+        // naam uit href halen
+        const parts = decodeURIComponent(href).split("/").filter(Boolean);
+        if (!parts.length) return null;
+        const name = parts[parts.length - 1].replace(/\/$/, "");
+
+        // root-directory zelf overslaan
+        if (!name) return null;
+
+        return { name, dt, isDir };
+      }
+
+      const allEntries = responses
+        .map(parseEntry)
+        .filter(e => e && e.name.toLowerCase().endsWith(".zpaq"));
+
+      logLine("ZPAQ entries gevonden via PROPFIND: " +
+        JSON.stringify(allEntries.map(e => ({ name: e.name, dt: e.dt }))));
+
+      // sorteer op lastmodified, nieuwste eerst
+      allEntries.sort((a, b) => b.dt - a.dt);
+
+      if (allEntries.length > 3) {
+        const toDelete = allEntries.slice(3);
+        logLine("Te verwijderen (oudste eerst): " +
+          JSON.stringify(toDelete.map(x => ({ name: x.name, dt: x.dt }))));
+
+        for (const f of toDelete) {
+          const target = `${base}/${f.name}`;
+
+          const delResp = await axios({
+            url: target,
+            method: "DELETE",
+            auth: { username: NAS_USER, password: NAS_PASS },
+            httpsAgent,
+            validateStatus: () => true
+          });
+
+          logLine(`DELETE ${f.isDir ? "collection" : "file"}: ${f.name} → HTTP ${delResp.status}`);
+        }
+      } else {
+        logLine("Cleanup: minder dan of gelijk aan 3 .zpaq, niets te verwijderen");
       }
 
     } catch (cleanupErr) {
@@ -218,7 +318,7 @@ app.get("/run", async (req, res) => {
     }
 
     //----------------------------------------------------------------
-    // WEBHOOK OK
+    // 5. WEBHOOK OK
     //----------------------------------------------------------------
     await sendStatusWebhook("OK", {
       filename: newName,
