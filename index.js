@@ -22,7 +22,7 @@ function logLine(line) {
 }
 
 // ---------------------------------------------------------------
-// WEBHOOK NAAR MVC-SITE
+// WEBHOOK
 // ---------------------------------------------------------------
 async function sendStatusWebhook(type, data) {
   const url = process.env.MAIL_WEBHOOK_URL;
@@ -33,21 +33,17 @@ async function sendStatusWebhook(type, data) {
   }
 
   try {
-    await axios.post(
-      url,
-      {
-        type,
-        filename: data.filename || null,
-        sizeBytes: data.sizeBytes || null,
-        sha1: data.sha1 || null,
-        error: data.error || null,
-        time: new Date().toISOString()
-      },
-      {
-        timeout: 10000,
-        headers: { "Content-Type": "application/json" }
-      }
-    );
+    await axios.post(url, {
+      type,
+      filename: data.filename || null,
+      sizeBytes: data.sizeBytes || null,
+      sha1: data.sha1 || null,
+      error: data.error || null,
+      time: new Date().toISOString()
+    }, {
+      timeout: 10000,
+      headers: { "Content-Type": "application/json" }
+    });
 
     logLine("✉ Webhook verzonden: " + type);
 
@@ -70,8 +66,6 @@ function dumpAllEnv() {
 }
 
 // ---------------------------------------------------------------
-// ROUTES
-// ---------------------------------------------------------------
 app.get("/", (req, res) => res.send("✅ MonsterASP → Synology NAS Bridge actief"));
 
 app.get("/testmail", async (req, res) => {
@@ -80,7 +74,7 @@ app.get("/testmail", async (req, res) => {
 });
 
 // ---------------------------------------------------------------
-// /RUN — hoofdflow
+// RUN
 // ---------------------------------------------------------------
 app.get("/run", async (req, res) => {
   const sftp = new Client();
@@ -90,9 +84,9 @@ app.get("/run", async (req, res) => {
     logLine("===== /run gestart =====");
     dumpAllEnv();
 
-    // -----------------------------------------------------------
-    // 1️⃣ DOWNLOAD
-    // -----------------------------------------------------------
+    //----------------------------------------------------------------
+    // 1 DOWNLOAD
+    //----------------------------------------------------------------
     await sftp.connect({
       host: "bh2.siteasp.net",
       port: 22,
@@ -103,7 +97,7 @@ app.get("/run", async (req, res) => {
     const files = (await sftp.list("/")).filter(f => f.name.endsWith(".zpaq"));
     if (!files.length) throw new Error("Geen .zpaq-bestanden gevonden");
 
-    files.sort((a, b) => b.modifyTime - a.modifyTime); // nieuwste eerst
+    files.sort((a, b) => b.modifyTime - a.modifyTime);
     const latest = files[0];
     const localPath = path.join(BACKUP_DIR, latest.name);
 
@@ -113,18 +107,17 @@ app.get("/run", async (req, res) => {
 
     const stats = fs.statSync(localPath);
     const sha1 = crypto.createHash("sha1").update(fs.readFileSync(localPath)).digest("hex");
-
     logLine(`✔ Download klaar (${stats.size} bytes, SHA1=${sha1})`);
 
-    // -----------------------------------------------------------
-    // 2️⃣ BESTANDSNAAM MET DATUM MAKEN
-    // -----------------------------------------------------------
+    //----------------------------------------------------------------
+    // 2 BESTANDSNAAM MAKEN
+    //----------------------------------------------------------------
     const stamp = new Date().toISOString().replace(/[:T]/g, "-").split(".")[0];
     const newName = `${latest.name.replace(".zpaq", "")}_${stamp}.zpaq`;
 
-    // -----------------------------------------------------------
-    // 3️⃣ UPLOAD NAAR NAS
-    // -----------------------------------------------------------
+    //----------------------------------------------------------------
+    // 3 UPLOAD NAAR NAS
+    //----------------------------------------------------------------
     const NAS_URL = process.env.NAS_URL;
     const NAS_USER = process.env.NAS_USER;
     const NAS_PASS = process.env.NAS_PASS;
@@ -155,9 +148,9 @@ app.get("/run", async (req, res) => {
 
     logLine("✔ Upload naar NAS voltooid: " + newName);
 
-    // -----------------------------------------------------------
-    // 4️⃣ CLEANUP — ALLEEN 3 LAATSTE BEWAREN
-    // -----------------------------------------------------------
+    //----------------------------------------------------------------
+    // 4 CLEANUP ZONDER REGEX — ALLEEN 3 LAATSTE OVERHOUDEN
+    //----------------------------------------------------------------
     try {
       const propfind = await axios.request({
         url: base + "/",
@@ -170,40 +163,52 @@ app.get("/run", async (req, res) => {
 
       const xml = propfind.data;
 
-      // Alle items ophalen
       let allItems = [...xml.matchAll(/<d:href>(.*?)<\/d:href>/g)]
         .map(m => decodeURIComponent(m[1]))
         .map(x => x.split("/").pop())
-        .map(x => x.replace(/\/$/, ""))   // Synology geeft soms een trailing slash
-        .filter(x => x && x.endsWith(".zpaq")); // alleen zpaq-bestanden
+        .map(x => x.replace(/\/$/, ""))
+        .filter(x => x && x.endsWith(".zpaq"));
 
-      // Alleen bestanden met datum-suffix
-      let datedFiles = allItems.filter(name =>
-        /^.+_\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}\.zpaq$/.test(name)
-      );
+      // Timestamp extraheren ZONDER regex
+      function extractTimestamp(filename) {
+        const lastUnderscore = filename.lastIndexOf("_");
+        if (lastUnderscore === -1) return null;
 
-      logLine("Datum-bestanden: " + JSON.stringify(datedFiles));
+        const timePart = filename.substring(lastUnderscore + 1, filename.length - ".zpaq".length);
 
-      if (datedFiles.length > 3) {
-        // sorteren op datum in bestandsnaam (nieuwste eerst)
-        datedFiles.sort((a, b) => {
-          const ta = a.match(/_(\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})/)[1].replace(/-/g, "");
-          const tb = b.match(/_(\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})/)[1].replace(/-/g, "");
-          return Number(tb) - Number(ta);
-        });
+        const cleaned = timePart.replace("_", "-"); // uniform maken
 
-        const toDelete = datedFiles.slice(3); // houd enkel de nieuwste 3
+        const parts = cleaned.split("-");
+        if (parts.length !== 6) return null;
 
-        logLine("Te verwijderen: " + JSON.stringify(toDelete));
+        const [Y, M, D, h, m, s] = parts;
+        const dt = new Date(`${Y}-${M}-${D}T${h}:${m}:${s}Z`);
+
+        if (isNaN(dt.getTime())) return null;
+
+        return dt;
+      }
+
+      const parsed = allItems.map(name => ({
+        name,
+        dt: extractTimestamp(name)
+      })).filter(x => x.dt != null);
+
+      parsed.sort((a, b) => b.dt - a.dt); // nieuwste eerst
+
+      if (parsed.length > 3) {
+        const toDelete = parsed.slice(3);
+
+        logLine("Te verwijderen: " + JSON.stringify(toDelete.map(x => x.name)));
 
         for (const f of toDelete) {
-          const delResp = await axios.delete(`${base}/${f}`, {
+          const delResp = await axios.delete(`${base}/${f.name}`, {
             auth: { username: NAS_USER, password: NAS_PASS },
             httpsAgent,
             validateStatus: () => true,
           });
 
-          logLine(`Verwijderd: ${f} (HTTP ${delResp.status})`);
+          logLine(`Verwijderd: ${f.name} (HTTP ${delResp.status})`);
         }
       }
 
@@ -211,9 +216,9 @@ app.get("/run", async (req, res) => {
       logLine("⚠ Cleanup fout: " + cleanupErr.message);
     }
 
-    // -----------------------------------------------------------
-    // 5️⃣ MELD SUCCES AAN MVC
-    // -----------------------------------------------------------
+    //----------------------------------------------------------------
+    // 5 WEBHOOK
+    //----------------------------------------------------------------
     await sendStatusWebhook("OK", {
       filename: newName,
       sizeBytes: stats.size,
