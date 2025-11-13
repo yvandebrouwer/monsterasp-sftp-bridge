@@ -30,17 +30,23 @@ async function sendStatusWebhook(type, data) {
   }
 
   try {
-    await axios.post(url, {
-      type,
-      filename: data.filename || null,
-      sizeBytes: data.sizeBytes || null,
-      sha1: data.sha1 || null,
-      error: data.error || null,
-      time: new Date().toISOString()
-    }, {
-      timeout: 10000,
-      headers: { "Content-Type": "application/json" }
-    });
+    await axios.post(
+      url,
+      {
+        type,
+        filename: data.filename || null,
+        sizeBytes: data.sizeBytes || null,
+        sha1: data.sha1 || null,
+        error: data.error || null,
+        time: new Date().toISOString()
+      },
+      {
+        timeout: 10000,
+        headers: {
+          "Content-Type": "application/json"
+        }
+      }
+    );
 
     logLine("✉ Webhook mailstatus verzonden: " + type);
   } catch (e) {
@@ -61,7 +67,7 @@ function dumpAllEnv() {
 }
 
 // ==========================================
-// Test Webhook
+// Test of Webhook bereikbaar is
 // ==========================================
 app.get("/testmail", async (req, res) => {
   try {
@@ -107,7 +113,6 @@ app.get("/run", async (req, res) => {
 
     files.sort((a, b) => b.modifyTime - a.modifyTime);
     const latest = files[0];
-
     const localPath = path.join(BACKUP_DIR, latest.name);
 
     logLine("Start download: " + latest.name);
@@ -118,24 +123,7 @@ app.get("/run", async (req, res) => {
     const sha1 = crypto.createHash("sha1").update(fs.readFileSync(localPath)).digest("hex");
     logLine(`✔ Download klaar (${stats.size} bytes, SHA1=${sha1})`);
 
-    // --- 2️⃣ Maak unieke NAS-bestandsnaam ---
-    const now = new Date();
-    const stamp =
-      now.getFullYear() +
-      "-" + String(now.getMonth() + 1).padStart(2, "0") +
-      "-" + String(now.getDate()).padStart(2, "0") +
-      "_" + String(now.getHours()).padStart(2, "0") +
-      "-" + String(now.getMinutes()).padStart(2, "0") +
-      "-" + String(now.getSeconds()).padStart(2, "0");
-
-    const ext = path.extname(latest.name);
-    const baseName = path.basename(latest.name, ext);
-
-    const uniqueFileName = `${baseName}_${stamp}${ext}`;
-
-    logLine("NAS-bestandsnaam: " + uniqueFileName);
-
-    // --- 3️⃣ Upload naar NAS ---
+    // --- 2️⃣ Upload naar NAS ---
     const NAS_URL = process.env.NAS_URL;
     const NAS_USER = process.env.NAS_USER;
     const NAS_PASS = process.env.NAS_PASS;
@@ -146,8 +134,7 @@ app.get("/run", async (req, res) => {
 
     let base = NAS_URL.trim();
     if (base.endsWith("/")) base = base.slice(0, -1);
-
-    const webdavUrl = `${base}/${uniqueFileName}`;
+    const webdavUrl = `${base}/${latest.name}`;
 
     process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
     const httpsAgent = new https.Agent({ rejectUnauthorized: false });
@@ -166,7 +153,9 @@ app.get("/run", async (req, res) => {
 
     logLine("✔ Upload naar NAS voltooid");
 
-    // --- 4️⃣ Cleanup: hou enkel 3 meest recente ---
+    // ==========================================
+    // 3️⃣ Cleanup — hou ALLEEN 3 nieuwste backups
+    // ==========================================
     try {
       const propfind = await axios.request({
         url: base + "/",
@@ -179,41 +168,40 @@ app.get("/run", async (req, res) => {
 
       const xml = propfind.data;
 
-      const entries = [...xml.matchAll(/<d:response>[\s\S]*?<d:href>(.*?)<\/d:href>[\s\S]*?<d:getlastmodified>(.*?)<\/d:getlastmodified>/g)]
-        .map(m => ({
-          name: decodeURIComponent(m[1]).split("/").pop(),
-          modified: new Date(m[2])
-        }))
-        .filter(x => x.name.endsWith(".zpaq"))
-        .sort((a, b) => b.modified - a.modified);
+      // Haal alle .zpaq-bestanden uit de WebDAV response
+      let entries = [...xml.matchAll(/<d:href>(.*?)<\/d:href>/g)]
+        .map(m => decodeURIComponent(m[1]).split("/").pop())
+        .filter(name => name.endsWith(".zpaq"));
+
+      // Sorteer alfabetisch (timestamp in naam → goed)
+      entries.sort();
 
       if (entries.length > 3) {
-        const toDelete = entries.slice(3);
+        const toDelete = entries.slice(0, entries.length - 3);
 
         for (const f of toDelete) {
-          logLine("Verwijder NAS-bestand: " + f.name);
-          await axios.delete(`${base}/${f.name}`, {
+          logLine("Verwijder NAS-bestand: " + f);
+          await axios.delete(`${base}/${f}`, {
             auth: { username: NAS_USER, password: NAS_PASS },
             httpsAgent,
             validateStatus: () => true,
           });
         }
       }
-
     } catch (cleanupErr) {
       logLine("⚠ Cleanup fout: " + cleanupErr.message);
     }
 
-    // --- 5️⃣ Webhook-melding ---
+    // --- 4️⃣ Meld succes via webhook ---
     await sendStatusWebhook("OK", {
-      filename: uniqueFileName,
+      filename: latest.name,
       sizeBytes: stats.size,
       sha1
     });
 
     res.json({
       success: true,
-      filename: uniqueFileName,
+      filename: latest.name,
       sizeBytes: stats.size,
       sha1,
       nasUrl: webdavUrl,
