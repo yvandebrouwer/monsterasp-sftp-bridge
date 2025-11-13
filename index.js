@@ -159,7 +159,6 @@ app.get("/run", async (req, res) => {
     // 4️⃣ CLEANUP — ALLEEN 3 LAATSTE BEWAREN
     // -----------------------------------------------------------
     try {
-
       const propfind = await axios.request({
         url: base + "/",
         method: "PROPFIND",
@@ -171,32 +170,40 @@ app.get("/run", async (req, res) => {
 
       const xml = propfind.data;
 
-      // Extract alle entries, ook mappen zoals file.zpaq/
-      let allFiles = [...xml.matchAll(/<d:href>(.*?)<\/d:href>/g)]
+      // Alle items ophalen
+      let allItems = [...xml.matchAll(/<d:href>(.*?)<\/d:href>/g)]
         .map(m => decodeURIComponent(m[1]))
         .map(x => x.split("/").pop())
-        .map(x => x.replace(/\/$/, "")); // <-- Synology fix
+        .map(x => x.replace(/\/$/, ""))   // Synology geeft soms een trailing slash
+        .filter(x => x && x.endsWith(".zpaq")); // alleen zpaq-bestanden
 
-      // Filter datum-bestanden
-      let datedFiles = allFiles.filter(name =>
+      // Alleen bestanden met datum-suffix
+      let datedFiles = allItems.filter(name =>
         /^.+_\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}\.zpaq$/.test(name)
       );
 
-      logLine("Datum-bestanden gevonden: " + JSON.stringify(datedFiles));
+      logLine("Datum-bestanden: " + JSON.stringify(datedFiles));
 
       if (datedFiles.length > 3) {
-        datedFiles.sort(); // alfabetisch = chronologisch
-        const toDelete = datedFiles.slice(0, datedFiles.length - 3);
+        // sorteren op datum in bestandsnaam (nieuwste eerst)
+        datedFiles.sort((a, b) => {
+          const ta = a.match(/_(\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})/)[1].replace(/-/g, "");
+          const tb = b.match(/_(\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})/)[1].replace(/-/g, "");
+          return Number(tb) - Number(ta);
+        });
+
+        const toDelete = datedFiles.slice(3); // houd enkel de nieuwste 3
 
         logLine("Te verwijderen: " + JSON.stringify(toDelete));
 
         for (const f of toDelete) {
-          await axios.delete(`${base}/${f}`, {
+          const delResp = await axios.delete(`${base}/${f}`, {
             auth: { username: NAS_USER, password: NAS_PASS },
             httpsAgent,
             validateStatus: () => true,
           });
-          logLine("Verwijderd: " + f);
+
+          logLine(`Verwijderd: ${f} (HTTP ${delResp.status})`);
         }
       }
 
