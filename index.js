@@ -5,7 +5,6 @@ import path from "path";
 import crypto from "crypto";
 import axios from "axios";
 import https from "https";
-import nodemailer from "nodemailer";
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -19,78 +18,30 @@ function logLine(line) {
   try { fs.appendFileSync(LOG_PATH, text); } catch {}
 }
 
-// Sexy HTML mail versturen (MET SMTP FIX)
-async function sendSexyMail(type, data) {
-  let subject;
-  let html;
+// 🔥 NIEUW: stuur status naar jouw MVC-site (in plaats van SMTP)
+async function sendStatusWebhook(type, data) {
+  const url = process.env.MAIL_WEBHOOK_URL;
 
-  if (type === "OK") {
-    subject = "✓ Backup Succesvol — Bridge OK";
-
-    html = `
-      <div style="font-family:Arial;padding:20px;background:#f6fff6;border:1px solid #c8e6c9;border-radius:8px;">
-        <h2 style="color:#2e7d32;">✔ Backup succesvol!</h2>
-        <p>De nieuwste backup werd correct gedownload én opgeslagen op de NAS.</p>
-
-        <table style="margin-top:15px;">
-          <tr><td><strong>Bestand:</strong></td><td>${data.filename}</td></tr>
-          <tr><td><strong>Grootte:</strong></td><td>${data.sizeBytes} bytes</td></tr>
-          <tr><td><strong>SHA1:</strong></td><td>${data.sha1}</td></tr>
-          <tr><td><strong>Tijdstip:</strong></td><td>${new Date().toLocaleString()}</td></tr>
-        </table>
-
-        <p style="margin-top:20px;color:#555;">
-          Alles werkt zoals het hoort. ✔<br>
-          — Bridge Service
-        </p>
-      </div>
-    `;
-  }
-
-  if (type === "ERR") {
-    subject = "⚠ Backup Mislukt — Bridge FOUT";
-
-    html = `
-      <div style="font-family:Arial;padding:20px;background:#fff5f5;border:1px solid #ffcdd2;border-radius:8px;">
-        <h2 style="color:#c62828;">❌ Er is een fout opgetreden!</h2>
-        <p>De bridge kon de backup niet correct verwerken.</p>
-
-        <p style="font-size:14px;margin-top:15px;">
-          <strong>Foutmelding:</strong><br>
-          <span style="color:#b71c1c;">${data.error}</span>
-        </p>
-
-        <p style="margin-top:20px;color:#555;">
-          Gelieve dit na te kijken op de server of NAS.<br>
-          — Bridge Service
-        </p>
-      </div>
-    `;
+  if (!url) {
+    logLine("⚠ MAIL_WEBHOOK_URL niet ingesteld");
+    return;
   }
 
   try {
-
-    // ✅ FIX: Gmail SMTP dat werkt op Render
-    const t = nodemailer.createTransport({
-      host: "smtp.gmail.com",
-      port: 465,
-      secure: true,
-      auth: {
-        user: process.env.GMAIL_USER,
-        pass: process.env.GMAIL_PASS
-      }
+    await axios.post(url, {
+      type,
+      filename: data.filename || null,
+      sizeBytes: data.sizeBytes || null,
+      sha1: data.sha1 || null,
+      error: data.error || null,
+      time: new Date().toISOString()
+    }, {
+      timeout: 10000
     });
 
-    await t.sendMail({
-      from: process.env.GMAIL_USER,
-      to: "debrouweryvan@gmail.com",
-      subject,
-      html
-    });
-
-    logLine("✉ Sexy mail verzonden: " + subject);
+    logLine("✉ Webhook mailstatus verzonden: " + type);
   } catch (e) {
-    logLine("⚠ Mailfout: " + e.message);
+    logLine("⚠ Webhook fout: " + e.message);
   }
 }
 
@@ -117,37 +68,19 @@ app.get("/logs", (req, res) => {
   }
 });
 
+// Test of webhook bereikt kan worden
 app.get("/testmail", async (req, res) => {
   try {
-    const t = nodemailer.createTransport({
-      host: "smtp.gmail.com",
-      port: 465,
-      secure: true,
-      auth: {
-        user: process.env.GMAIL_USER,
-        pass: process.env.GMAIL_PASS
-      }
-    });
-
-    await t.sendMail({
-      from: process.env.GMAIL_USER,
-      to: "debrouweryvan@gmail.com",
-      subject: "TESTMAIL — Render",
-      text: "Dit is een testmail vanuit jouw Render-bridge."
-    });
-
-    logLine("✉ TESTMAIL verzonden");
-    res.send("✔ Testmail verzonden!");
-  } catch (err) {
-    logLine("❌ Testmail fout: " + err.message);
-    res.status(500).send("❌ Testmail fout: " + err.message);
+    await sendStatusWebhook("TEST", { filename: null });
+    res.send("✔ Webhook-test verzonden!");
+  } catch {
+    res.status(500).send("❌ Webhook-test mislukt");
   }
 });
 
-
-
 app.get("/run", async (req, res) => {
   const sftp = new Client();
+
   try {
     fs.mkdirSync(BACKUP_DIR, { recursive: true });
     logLine("===== /run gestart =====");
@@ -206,7 +139,7 @@ app.get("/run", async (req, res) => {
 
     logLine("✔ Upload naar NAS voltooid");
 
-    // --- 3️⃣ Cleanup op NAS ---
+    // --- 3️⃣ Cleanup: hou enkel 3 laatste backups ---
     try {
       const propfind = await axios.request({
         url: base + "/",
@@ -242,15 +175,15 @@ app.get("/run", async (req, res) => {
       logLine("⚠ Cleanup fout: " + cleanupErr.message);
     }
 
-    // --- verstuur sexy succesmail ---
-    await sendSexyMail("OK", {
+    // --- 4️⃣ Meld succes aan jouw MVC-site ---
+    await sendStatusWebhook("OK", {
       filename: latest.name,
       sizeBytes: stats.size,
       sha1
     });
 
     res.json({
-      status: "OK",
+      success: true,
       filename: latest.name,
       sizeBytes: stats.size,
       sha1,
@@ -261,11 +194,11 @@ app.get("/run", async (req, res) => {
   } catch (err) {
     logLine("❌ Fout in /run: " + err.message);
 
-    await sendSexyMail("ERR", { error: err.message });
+    // Webhook melding
+    await sendStatusWebhook("ERR", { error: err.message });
 
-    res.status(500).json({ status: "Error", error: err.message });
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
 app.listen(PORT, () => logLine(`Server running on port ${PORT}`));
-
