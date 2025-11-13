@@ -85,7 +85,7 @@ app.get("/run", async (req, res) => {
     dumpAllEnv();
 
     //----------------------------------------------------------------
-    // 1 DOWNLOAD
+    // DOWNLOAD
     //----------------------------------------------------------------
     await sftp.connect({
       host: "bh2.siteasp.net",
@@ -110,13 +110,13 @@ app.get("/run", async (req, res) => {
     logLine(`✔ Download klaar (${stats.size} bytes, SHA1=${sha1})`);
 
     //----------------------------------------------------------------
-    // 2 BESTANDSNAAM MAKEN
+    // NIEUWE BESTANDSNAAM
     //----------------------------------------------------------------
     const stamp = new Date().toISOString().replace(/[:T]/g, "-").split(".")[0];
     const newName = `${latest.name.replace(".zpaq", "")}_${stamp}.zpaq`;
 
     //----------------------------------------------------------------
-    // 3 UPLOAD NAAR NAS
+    // UPLOAD NAAR NAS
     //----------------------------------------------------------------
     const NAS_URL = process.env.NAS_URL;
     const NAS_USER = process.env.NAS_USER;
@@ -126,9 +126,7 @@ app.get("/run", async (req, res) => {
       throw new Error("NAS_URL of NAS_USER of NAS_PASS ontbreekt");
     }
 
-    let base = NAS_URL.trim();
-    if (base.endsWith("/")) base = base.slice(0, -1);
-
+    let base = NAS_URL.trim().replace(/\/$/, "");
     const webdavUrl = `${base}/${newName}`;
 
     process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
@@ -142,14 +140,13 @@ app.get("/run", async (req, res) => {
       validateStatus: () => true,
     });
 
-    if (!(response.status >= 200 && response.status < 300)) {
+    if (!(response.status >= 200 && response.status < 300))
       throw new Error(`Upload mislukt (${response.status})`);
-    }
 
     logLine("✔ Upload naar NAS voltooid: " + newName);
 
     //----------------------------------------------------------------
-    // 4 CLEANUP — OP BASIS VAN ECHTE PROPFIND DATUM
+    // CLEANUP – OP BASIS VAN ECHTE SYNOLOGY DATUM + MAP/FOLDER FIX
     //----------------------------------------------------------------
     try {
       const propfind = await axios.request({
@@ -163,42 +160,57 @@ app.get("/run", async (req, res) => {
 
       const xml = propfind.data;
 
-      // Alle entries eruit halen
-      const entries = [...xml.matchAll(/<d:response>[\s\S]*?<\/d:response>/g)]
-        .map(block => {
-          const href = (block[0].match(/<d:href>(.*?)<\/d:href>/) || [null, null])[1];
-          const mod  = (block[0].match(/<d:getlastmodified>(.*?)<\/d:getlastmodified>/) || [null, null])[1];
+      // Extract D:response blokken
+      const blocks = [...xml.matchAll(/<d:response>[\s\S]*?<\/d:response>/g)];
 
-          if (!href || !mod) return null;
+      // Parse entries
+      const entries = blocks.map(block => {
+        const b = block[0];
 
-          const name = decodeURIComponent(href).split("/").pop().replace(/\/$/, "");
-          if (!name.endsWith(".zpaq")) return null;
+        const href = (b.match(/<d:href>(.*?)<\/d:href>/) || [null, null])[1];
+        if (!href) return null;
 
-          const dt = new Date(mod);
-          if (isNaN(dt.getTime())) return null;
+        let nameRaw = decodeURIComponent(href).split("/").pop();
+        if (!nameRaw) return null;
 
-          return { name, dt };
-        })
-        .filter(x => x !== null);
+        const isDir = /<d:collection\s*\/>/.test(b); // map of bestand
 
-      // sorteren: nieuwste eerst
+        const name = nameRaw.replace(/\/$/, ""); // trailing slash → weg
+
+        if (!name.endsWith(".zpaq")) return null;
+
+        const modText = (b.match(/<d:getlastmodified>(.*?)<\/d:getlastmodified>/) || [null, null])[1];
+        if (!modText) return null;
+
+        const dt = new Date(modText);
+        if (isNaN(dt.getTime())) return null;
+
+        return { name, dt, isDir };
+      }).filter(x => x !== null);
+
+      // sorteer op echte datum (nieuwste eerst)
       entries.sort((a, b) => b.dt - a.dt);
 
-      if (entries.length > 3) {
-        const toDelete = entries.slice(3);
+      // houd 3 nieuwste
+      const toDelete = entries.slice(3);
 
-        logLine("Te verwijderen op basis van echte datum: " +
-                JSON.stringify(toDelete.map(x => x.name)));
+      if (toDelete.length) {
+        logLine("Te verwijderen: " + JSON.stringify(toDelete.map(x => x.name)));
+      }
 
-        for (const f of toDelete) {
-          const delResp = await axios.delete(`${base}/${f.name}`, {
-            auth: { username: NAS_USER, password: NAS_PASS },
-            httpsAgent,
-            validateStatus: () => true,
-          });
+      // DELETE uitvoeren
+      for (const f of toDelete) {
+        const target = `${base}/${f.name}`;
 
-          logLine(`Verwijderd: ${f.name} (HTTP ${delResp.status})`);
-        }
+        const delResp = await axios({
+          url: target,
+          method: "DELETE",
+          auth: { username: NAS_USER, password: NAS_PASS },
+          httpsAgent,
+          validateStatus: () => true
+        });
+
+        logLine(`DELETE ${f.isDir ? "folder" : "file"}: ${f.name} → HTTP ${delResp.status}`);
       }
 
     } catch (cleanupErr) {
@@ -206,7 +218,7 @@ app.get("/run", async (req, res) => {
     }
 
     //----------------------------------------------------------------
-    // 5 WEBHOOK
+    // WEBHOOK OK
     //----------------------------------------------------------------
     await sendStatusWebhook("OK", {
       filename: newName,
