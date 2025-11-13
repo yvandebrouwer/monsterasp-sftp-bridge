@@ -19,7 +19,7 @@ function logLine(line) {
   try { fs.appendFileSync(LOG_PATH, text); } catch {}
 }
 
-// Sexy HTML mail versturen
+// Sexy HTML mail versturen (MET SMTP FIX)
 async function sendSexyMail(type, data) {
   let subject;
   let html;
@@ -69,9 +69,16 @@ async function sendSexyMail(type, data) {
   }
 
   try {
+
+    // ✅ FIX: Gmail SMTP dat werkt op Render
     const t = nodemailer.createTransport({
-      service: "gmail",
-      auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_PASS },
+      host: "smtp.gmail.com",
+      port: 465,
+      secure: true,
+      auth: {
+        user: process.env.GMAIL_USER,
+        pass: process.env.GMAIL_PASS
+      }
     });
 
     await t.sendMail({
@@ -170,7 +177,7 @@ app.get("/run", async (req, res) => {
 
     logLine("✔ Upload naar NAS voltooid");
 
-    // --- 3️⃣ Cleanup op NAS: hou alleen 3 recentste ---
+    // --- 3️⃣ Cleanup op NAS ---
     try {
       const propfind = await axios.request({
         url: base + "/",
@@ -190,7 +197,7 @@ app.get("/run", async (req, res) => {
         .map(x => x.split("/").pop());
 
       if (entries.length > 3) {
-        entries.sort(); // oudste eerst
+        entries.sort();
         const toDelete = entries.slice(0, entries.length - 3);
 
         for (const f of toDelete) {
