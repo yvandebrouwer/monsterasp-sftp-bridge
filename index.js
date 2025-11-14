@@ -74,6 +74,10 @@ app.get("/testmail", async (req, res) => {
   res.send("✔ Webhook-test verzonden!");
 });
 
+app.get("/keepalive", (req, res) => {
+  res.send("OK");
+});
+
 // ---------------------------------------------------------------
 // RUN
 // ---------------------------------------------------------------
@@ -346,3 +350,4 @@ app.get("/run", async (req, res) => {
 
 // ---------------------------------------------------------------
 app.listen(PORT, () => logLine(`Server running on port ${PORT}`));
+
