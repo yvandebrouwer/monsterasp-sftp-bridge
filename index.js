@@ -340,14 +340,24 @@ app.get("/run", async (req, res) => {
     });
 
   } catch (err) {
-    logLine("❌ Fout in /run: " + err.message);
+    const errorMessage = err?.message || String(err);
+    const errorCode = err?.code || "onbekend";
+    const httpStatus = err?.response?.status ?? "geen";
 
-    await sendStatusWebhook("ERR", { error: err.message });
+    logLine("❌ Fout in /run:");
+    logLine("Foutmelding: " + errorMessage);
+    logLine("Foutcode: " + errorCode);
+    logLine("HTTP-status: " + httpStatus);
 
-    res.status(500).json({ success: false, error: err.message });
+    if (err?.stack) {
+      logLine("Stacktrace: " + err.stack);
+    }
+
+    await sendStatusWebhook("ERR", { error: errorMessage });
+
+    res.status(500).json({ success: false, error: errorMessage });
   }
 });
 
 // ---------------------------------------------------------------
 app.listen(PORT, () => logLine(`Server running on port ${PORT}`));
-
